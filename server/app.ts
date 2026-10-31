@@ -12,7 +12,7 @@ import { AppError, type FhirStore } from './fhir.js';
 import { RegistrationService } from './registration.js';
 import { importRoster, parseRoster } from './imports.js';
 import { addRosterEntry, removeRosterEntry } from './roster.js';
-import type { Config } from './config.js';
+import { repositoryRoot, type Config } from './config.js';
 
 export async function buildApp(store: FhirStore, config: Config) {
   const app = Fastify({ bodyLimit: 1024 * 1024, logger: { redact: ['req.headers.cookie', 'req.headers.authorization', 'res.headers.set-cookie'] }, disableRequestLogging: true });
@@ -130,7 +130,7 @@ export async function buildApp(store: FhirStore, config: Config) {
     reply.header('Content-Disposition', 'attachment; filename="hackathon-2026-checkins.csv"').type('text/csv; charset=utf-8');
     return checkinsCsv(rows);
   });
-  const dist = resolve('dist');
+  const dist = resolve(repositoryRoot, 'dist');
   if (existsSync(dist)) {
     await app.register(staticFiles, { root: dist });
     app.setNotFoundHandler((request, reply) => {

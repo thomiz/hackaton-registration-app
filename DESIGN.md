@@ -12,7 +12,10 @@ All application and application-specific FHIR sources live here.
 The application uses a React/TypeScript frontend and a Fastify backend that
 stores FHIR R4 resources in a local JSON file. There is no separate database,
 FHIR server, container or administration application. Browsers talk only to
-the check-in backend.
+the check-in backend. The server and command-line tools are compiled with
+`tsc` (`tsconfig.server.json`, Node module resolution) into `dist-server` and
+run with plain Node.js 22+; `tsx` is used only for development and the FHIR IG
+tooling.
 
 All dashboard data comes from the stored FHIR resources. There is no automatic
 success response when persistence fails.
@@ -56,7 +59,8 @@ The IG title and package ID are `hackathon-check-in-app`, with
 canonical URL `https://hl7.no/fhir/ig/hackathon-check-in-app`.
 Its FHIR machine-readable name is `HackathonCheckInApp`.
 The repository and npm package are also named
-`hackathon-check-in-app`. The app and IG release version is `0.7.0`.
+`hackathon-check-in-app`. The app version is `0.8.0`; the IG release version
+is `0.7.0` (its FHIR definitions did not change in 0.8.0).
 
 * Persons represent expected participants and use the event participant
   identifier system.
@@ -132,9 +136,9 @@ locking, concurrent writers, batches) and the operations CLI.
 These steps apply only to deployments running older versions. For a new
 installation, follow the [README setup instructions](README.md#windows-setup).
 
-### Replacing Blaze with the JSON data file
+### Replacing Blaze with the JSON data file (0.8.0)
 
-Versions up to this change used a Blaze FHIR server in Docker. Stop the app,
+Versions before 0.8.0 used a Blaze FHIR server in Docker. Stop the app,
 then either run `npm.cmd run migrate:blaze` while the old Blaze container is
 still running (see the [README](README.md#migrating-from-an-earlier-blaze-installation)),
 or start with an empty `DATA_DIR` and reimport the reviewed rosters. Then

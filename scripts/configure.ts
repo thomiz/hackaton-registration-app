@@ -1,9 +1,13 @@
 import { randomBytes, scryptSync } from 'node:crypto';
 import { access, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
+import { repositoryRoot } from '../server/config.js';
+
+const envFile = join(repositoryRoot, '.env');
 
 try {
-  await access('.env');
+  await access(envFile);
   throw new Error('.env already exists. Edit it manually; refusing to overwrite credentials.');
 } catch (error) {
   if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
@@ -20,7 +24,7 @@ const values: Record<string, string> = {
   SESSION_SECRET: randomBytes(32).toString('hex'),
   STAFF_PASSWORD_HASH: `${salt}:${scryptSync(password, salt, 64).toString('hex')}`
 };
-const template = await readFile('.env.example', 'utf8');
-await writeFile('.env', template.replace(/^([A-Z_]+)=(.*)$/gm, (line, key: string) => key in values ? `${key}=${values[key]}` : line), { flag: 'wx', mode: 0o600 });
+const template = await readFile(join(repositoryRoot, '.env.example'), 'utf8');
+await writeFile(envFile, template.replace(/^([A-Z_]+)=(.*)$/gm, (line, key: string) => key in values ? `${key}=${values[key]}` : line), { flag: 'wx', mode: 0o600 });
 console.log('Created .env with generated secrets. Restrict its Windows file permissions to event operators.');
-console.log('Next run "npm run build", then "npm run ops -- start". See README.md.');
+console.log('Next start the app with "npm run ops -- start". See README.md.');

@@ -2,6 +2,7 @@ import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import type { Bundle, Person } from 'fhir/r4';
 import { agendaRoster, rosterCsv } from '../server/agenda.js';
+import { repositoryRoot } from '../server/config.js';
 import { person } from '../server/model.js';
 import { CANONICAL, ROLE_SYSTEM } from '../shared/domain.js';
 
@@ -16,7 +17,7 @@ const bundle: Bundle<Person> = {
     resource: person(row.id, row)
   }))
 };
-const directory = resolve('seed');
+const directory = resolve(repositoryRoot, 'seed');
 await mkdir(directory, { recursive: true });
 await writeFile(join(directory, 'staff.csv'), '\uFEFF' + rosterCsv(rows));
 await writeFile(join(directory, 'staff-persons.json'), JSON.stringify(bundle, null, 2) + '\n');

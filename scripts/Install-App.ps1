@@ -8,8 +8,8 @@ try {
     & "$PSScriptRoot\Install-Prerequisites.ps1" -CheckOnly
     if (-not $?) { throw 'Prerequisite checks failed.' }
     $version = & node.exe -p 'process.versions.node'
-    if ($LASTEXITCODE -ne 0 -or [version]$version -lt [version]'18.17.0') {
-        throw 'Node.js 18.17 or newer is required; use a maintained Node.js LTS release for deployment.'
+    if ($LASTEXITCODE -ne 0 -or [version]$version -lt [version]'22.0.0') {
+        throw 'Node.js 22 or newer is required; use a maintained Node.js LTS release for deployment.'
     }
     & npm.cmd ci --no-audit --no-fund
     if ($LASTEXITCODE -ne 0) { throw 'Locked dependency installation failed.' }

@@ -12,3 +12,4 @@ fhir/temp/
 fhir/template/
 fhir/input-cache/
 *.log
+dist-server/

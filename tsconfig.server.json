@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+    "noEmit": false,
+    "outDir": "dist-server",
+    "rootDir": ".",
+    "sourceMap": true,
+    "paths": { "fhir/r4": ["./node_modules/@types/fhir/r4.d.ts"] }
+  },
+  "include": [
+    "server",
+    "shared",
+    "scripts/ops.ts",
+    "scripts/ops-core.ts",
+    "scripts/configure.ts",
+    "scripts/generate-staff.ts",
+    "scripts/migrate-from-blaze.ts"
+  ]
+}

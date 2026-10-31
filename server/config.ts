@@ -1,14 +1,24 @@
-import { resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { config as dotenv } from 'dotenv';
 import { z } from 'zod';
 
-export const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
+// The application folder: the nearest directory with package.json, from source or compiled output.
+export const repositoryRoot = (() => {
+  let directory = dirname(fileURLToPath(import.meta.url));
+  while (!existsSync(join(directory, 'package.json'))) {
+    const parent = dirname(directory);
+    if (parent === directory) throw new Error('Cannot locate the application folder (package.json).');
+    directory = parent;
+  }
+  return directory;
+})();
 
 export function loadConfig(environment?: NodeJS.ProcessEnv) {
   if (!environment) {
-    const result = dotenv({ path: resolve(repositoryRoot, '.env') });
-    if (result.error && !('code' in result.error && result.error.code === 'ENOENT')) throw result.error;
+    // Values already set in the environment take precedence over .env.
+    try { process.loadEnvFile(resolve(repositoryRoot, '.env')); }
+    catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error; }
     environment = process.env;
   }
   const schema = z.object({

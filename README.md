@@ -4,8 +4,11 @@ Responsive attendee check-in and authenticated registration-desk tools for
 November 9, 2026 at Rebel, Oslo. React/TypeScript frontend, Fastify backend,
 FHIR R4 resources stored in a local JSON file, and locally generated QR attendance receipts.
 
-The app and FHIR implementation guide are named `hackathon-check-in-app`,
-version `0.7.0`. Installations older than 0.6.0 must follow the
+The app and FHIR implementation guide are named `hackathon-check-in-app`.
+The app is version `0.8.0` (FHIR storage moved from Blaze to a local JSON file;
+see [Migrating from an earlier Blaze installation](#migrating-from-an-earlier-blaze-installation)).
+The IG remains version `0.7.0`, because its FHIR definitions are unchanged.
+Installations older than 0.6.0 must follow the
 [0.6.0 upgrade guidance](DESIGN.md#upgrading-to-060) before using the renamed
 FHIR namespace.
 
@@ -44,9 +47,8 @@ and migration guidance for older deployments.
 
 ## Windows setup
 
-Use a supported Windows version and a maintained Node.js LTS release; the
-application currently supports Node.js 18.17+. No Docker, WSL, Java or database
-server is needed.
+Use a supported Windows version and Node.js 22 or newer (a maintained LTS
+release is recommended). No Docker, WSL, Java or database server is needed.
 
 ```powershell
 Set-Location 'D:\Programdisk-2\GitRepo\hackathon-check-in-app'
@@ -67,9 +69,15 @@ Equivalent manual steps:
 
 ```powershell
 npm.cmd ci
-npm.cmd run configure
 npm.cmd run build
+npm.cmd run configure
 ```
+
+`npm.cmd run build` type-checks everything, builds the browser UI into `dist`
+and compiles the server and command-line tools into `dist-server`. The app,
+`ops`, `configure`, `staff:generate` and `migrate:blaze` run that compiled
+JavaScript with plain `node`, so they need a build first and do not pick up
+source changes until the next build.
 
 ## Data storage
 
@@ -96,7 +104,7 @@ in `.env`. Relative paths are resolved against the application folder.
 
 ### Migrating from an earlier Blaze installation
 
-Versions before this one stored data in a Blaze FHIR server. To carry over
+Versions before 0.8.0 stored data in a Blaze FHIR server. To carry over
 existing rosters and attendance, start the old Blaze container once more and
 run, with an empty `DATA_DIR`:
 
@@ -138,7 +146,8 @@ Invoke-RestMethod 'http://localhost:8080/api/health'
 The UI exposes the separate **Staff access** page; the staff roster does not grant
 login rights. Staff sessions last 30 minutes and require re-login after expiry.
 
-For development, run `npm run dev` and `npm run dev:ui` in separate terminals;
+For development, run `npm run dev` (the server from source, restarting on
+changes) and `npm run dev:ui` in separate terminals;
 set `PUBLIC_URL=http://localhost:5173` for Vite's same-origin API proxy. Production
 serves the built UI and API from the same backend origin.
 

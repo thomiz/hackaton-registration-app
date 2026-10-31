@@ -67,7 +67,7 @@ securely. See [Backup and restore](README.md#backup-and-restore) for restoring.
 
 Before first real use, confirm:
 
-* Git and Node.js/npm are installed, `npm.cmd test` and `npm.cmd run build`
+* Git and Node.js 22+/npm are installed, `npm.cmd test` and `npm.cmd run build`
   passed, and `.env` is configured (staff login, application URL and, if not
   the default, `DATA_DIR`). Keep `.env` private.
 * The latest reviewed attendee CSV has been imported, and the staff roster has
@@ -237,7 +237,8 @@ reset when starting a new attendance run.
    Preserve `.env`, private CSVs and the data directory.
 4. If `package.json` or `package-lock.json` changed, run `npm.cmd ci`.
 5. Run `npm.cmd test`, then `npm.cmd run build`. **Restarting alone does not
-   rebuild the client.**
+   rebuild anything:** the app and the `ops` commands run the compiled output
+   from the last build.
 6. Apply any additional steps relevant to the update:
 
    | What else changed? | Required action |

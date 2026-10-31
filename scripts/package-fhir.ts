@@ -4,7 +4,15 @@ import { spawnSync } from 'node:child_process';
 import { CANONICAL } from '../shared/domain.js';
 
 const generated = resolve('fhir', 'fsh-generated', 'resources');
-const { name, version } = JSON.parse(await readFile(resolve('package.json'), 'utf8')) as { name: string; version: string };
+// The IG is versioned independently of the app: take its identity from the SUSHI configuration.
+const sushiConfig = await readFile(resolve('fhir', 'sushi-config.yaml'), 'utf8');
+const setting = (key: string) => {
+  const value = sushiConfig.match(new RegExp(`^${key}:\\s*(\\S+)\\s*$`, 'm'))?.[1];
+  if (!value) throw new Error(`fhir/sushi-config.yaml has no ${key}.`);
+  return value;
+};
+const name = setting('id');
+const version = setting('version');
 const output = resolve('fhir', 'output');
 const staging = join(output, 'package');
 await mkdir(staging, { recursive: true });
