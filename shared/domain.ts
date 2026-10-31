@@ -26,6 +26,9 @@ export const tracks = [
 export const trackSchema = z.enum(['', 'care-plans', 'smart', 'medication-definition', 'ihe-mhd', 'ehds-summary', 'fhir-101']);
 export const roleSchema = z.enum(['attendee', 'track-lead']);
 export type Role = z.infer<typeof roleSchema>;
+export const rosterSourceSchema = z.enum(['roster', 'staff']);
+export type RosterSource = z.infer<typeof rosterSourceSchema>;
+export const rosterSourceLabels: Record<RosterSource, string> = { roster: 'attendee list', staff: 'staff list' };
 export const detailsSchema = z.object({
   name: z.string().trim().min(2).max(160),
   email: z.string().trim().email().max(254),
@@ -38,9 +41,13 @@ export const manualSchema = detailsSchema.extend({
   reason: z.string().trim().min(5).max(500),
   requestId: z.string().uuid()
 });
+export const rosterEntrySchema = detailsSchema.extend({ role: roleSchema, reason: z.string().trim().min(5).max(500) });
+export const rosterRemovalSchema = z.object({ reason: z.string().trim().min(5).max(500) });
 export type Details = z.infer<typeof detailsSchema>;
 export type Candidate = { token: string; name: string; affiliation: string; alreadyCheckedIn: boolean };
 export type Selection = Details & { selection: string };
+export type StaffSelection = Selection & { id: string; lists: RosterSource[] };
+export type RosterChange = { personId: string; id: string; created: boolean; lists: RosterSource[] };
 export type Confirmation = Details & { alreadyCheckedIn: boolean; role: Role; arrived: string; receiptId: string };
 export type DashboardRow = Details & {
   id: string;
@@ -48,6 +55,7 @@ export type DashboardRow = Details & {
   role: Role;
   arrived: string;
   manual: boolean;
+  lists: RosterSource[];
 };
 export type Dashboard = {
   totals: { roster: number; staff: number; checkedIn: number; rosterMissing: number; staffMissing: number; manual: number; attendees: number; trackLeads: number };

@@ -6,11 +6,12 @@ import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
 import staticFiles from '@fastify/static';
 import { z, ZodError } from 'zod';
-import { checkinSchema, detailsSchema, manualSchema, roleSchema, tracks } from '../shared/domain.js';
+import { checkinSchema, detailsSchema, manualSchema, roleSchema, rosterEntrySchema, rosterRemovalSchema, rosterSourceSchema, tracks } from '../shared/domain.js';
 import { checkinsCsv } from '../shared/export.js';
 import { AppError, type FhirStore } from './fhir.js';
 import { RegistrationService } from './registration.js';
 import { importRoster, parseRoster } from './imports.js';
+import { addRosterEntry, removeRosterEntry } from './roster.js';
 import type { Config } from './config.js';
 
 export async function buildApp(store: FhirStore, config: Config) {
@@ -86,7 +87,8 @@ export async function buildApp(store: FhirStore, config: Config) {
   app.post('/api/staff/select', async request => {
     session(request);
     const { token } = z.object({ token: z.string().max(2048) }).parse(request.body);
-    return { ...await service.select(token), id: service.verify(token, 'candidate') };
+    const id = service.verify(token, 'candidate');
+    return { ...await service.select(token), id, lists: await service.memberships(id) };
   });
   app.post('/api/staff/manual', async request => {
     const staff = session(request);
@@ -102,8 +104,20 @@ export async function buildApp(store: FhirStore, config: Config) {
   });
   app.post('/api/staff/import', async request => {
     session(request);
-    const { source, csv } = z.object({ source: z.enum(['roster', 'staff']), csv: z.string().min(1).max(900000) }).parse(request.body);
+    const { source, csv } = z.object({ source: rosterSourceSchema, csv: z.string().min(1).max(900000) }).parse(request.body);
     return { imported: await importRoster(service, source, parseRoster(csv)) };
+  });
+  app.post('/api/staff/rosters/:source/participants', async request => {
+    const staff = session(request);
+    const { source } = z.object({ source: rosterSourceSchema }).parse(request.params);
+    const input = rosterEntrySchema.parse(request.body);
+    return addRosterEntry(service, source, input, input.reason, staff);
+  });
+  app.delete('/api/staff/rosters/:source/participants/:id', async request => {
+    const staff = session(request);
+    const { source, id } = z.object({ source: rosterSourceSchema, id: z.string().regex(/^[A-Za-z0-9.-]{1,64}$/) }).parse(request.params);
+    const { reason } = rosterRemovalSchema.parse(request.body);
+    return removeRosterEntry(service, source, id, reason, staff);
   });
   app.get('/api/staff/receipts/:id', async request => {
     session(request);

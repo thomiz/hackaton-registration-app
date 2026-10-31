@@ -1,15 +1,15 @@
 import { parse } from 'csv-parse/sync';
 import type { BundleEntry, Person, Practitioner } from 'fhir/r4';
 import { z } from 'zod';
-import { createHash, randomUUID } from 'node:crypto';
-import { detailsSchema, ID_SYSTEM, LISTS, ROLE_SYSTEM, roleSchema, tracks } from '../shared/domain.js';
+import { randomUUID } from 'node:crypto';
+import { ID_SYSTEM, LISTS, ROLE_SYSTEM, tracks, type RosterSource } from '../shared/domain.js';
 import { AppError, put, resourceFingerprint } from './fhir.js';
 import { detailsOf, person, refs, roleOf } from './model.js';
-import { normalize, type RegistrationService } from './registration.js';
+import type { RegistrationService } from './registration.js';
+import { rowSchema, sameParticipant, stableRosterId, type ImportRow } from './roster.js';
 
-const rowSchema = detailsSchema.extend({ id: z.string().regex(/^[A-Za-z0-9.-]{1,64}$/), role: roleSchema });
-export type ImportRow = z.infer<typeof rowSchema>;
-export type RosterSource = 'roster' | 'staff';
+export type { ImportRow } from './roster.js';
+export type { RosterSource } from '../shared/domain.js';
 export type RosterUpdates = Partial<Record<RosterSource, ImportRow[]>>;
 export interface RosterPreview {
   source: RosterSource;
@@ -23,7 +23,7 @@ export interface RosterPreview {
 
 const inputRowSchema = rowSchema.extend({ id: rowSchema.shape.id.or(z.literal('')).optional() }).transform(row => ({
   ...row,
-  id: row.id || `roster-${createHash('sha256').update(JSON.stringify([normalize(row.name), normalize(row.affiliation)])).digest('hex').slice(0, 32)}`
+  id: row.id || stableRosterId(row.name, row.affiliation)
 }));
 const exportTrackCodes = new Map<string, string>([
   ...tracks.map(({ label, code }): [string, string] => [label, code]),
@@ -87,14 +87,11 @@ async function planRosters(service: RegistrationService, updates: RosterUpdates,
     const id = existing?.id ?? randomUUID();
     people.set(row.id, { id, existing });
     for (const p of all) {
-      const details = detailsOf(p);
-      if (p.id !== id && (details.email.toLowerCase() === row.email.toLowerCase() ||
-        (normalize(details.name) === normalize(row.name) && normalize(details.affiliation) === normalize(row.affiliation)))) {
+      if (p.id !== id && sameParticipant(detailsOf(p), row)) {
         throw new AppError(409, `Ambiguous duplicate for ID ${row.id}. Reconcile stable IDs before importing.`);
       }
     }
-    if (rows.some(other => other.id !== row.id && (other.email.toLowerCase() === row.email.toLowerCase() ||
-      (normalize(other.name) === normalize(row.name) && normalize(other.affiliation) === normalize(row.affiliation))))) {
+    if (rows.some(other => other.id !== row.id && sameParticipant(other, row))) {
       throw new AppError(400, `Ambiguous duplicate within CSV for ID ${row.id}.`);
     }
     const checkedInReference = existing?.link?.find(link => link.target.reference?.startsWith('Practitioner/'))?.target.reference;

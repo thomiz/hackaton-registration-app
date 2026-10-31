@@ -29,6 +29,8 @@ views check-in status. The organizer roster is the app's staff roster.
 * Linked Practitioners for actual arrivals, with attendee/track-lead qualification.
 * Staff login, FHIR-backed counts, track totals, corrections, manual registration,
   receipt retrieval and CSV export.
+* Audited single-participant roster changes from the organizer dashboard for
+  last-minute sign-ups and cancellations, without a full CSV reimport.
 * A readable attendance receipt and locally generated `mailto:` QR code after
   check-in that opens a pre-filled confirmation email to the attendee on iPhone
   and Android, including original arrival time and registered details.
@@ -321,6 +323,33 @@ npm.cmd run import -- staff 'D:\private\reviewed-staff.csv'
 
 Alternatively paste CSV in the authenticated staff page.
 
+### Last-minute single additions and removals
+
+For individual changes close to or during the event, the organizer dashboard
+can add or remove one person at a time without replacing a list:
+
+* **Add to list without check-in** uses the manual-registration fields (name,
+  email, affiliation, track, verified role and an audit reason) but only adds
+  the person to the selected attendee or staff List. Nothing is checked in; the
+  person then checks in from the attendee page like everyone else. The stable
+  ID is generated exactly as for CSV rows without an `id`, so a later complete
+  reimport that includes the same name and affiliation recognizes the same
+  Person. If someone with the same email, or the same name and affiliation,
+  already exists (for example in the other list), that Person is reused rather
+  than duplicated; the roles must agree, and details confirmed at check-in are
+  never overwritten. Adding someone already in the selected list is rejected.
+* **Remove from attendee list / staff list** appears after selecting a person
+  in the staff search or **Correct details** in the arrivals table. It removes
+  only the entry in that List, mirroring a reimport without that row: the
+  Person, any recorded check-in, receipt and export rows are kept, and the
+  person stays searchable if still in the other list. Removal from both lists
+  stops roster-based check-in, including with an earlier selection token.
+
+Every single change writes an AuditEvent with the staff username and reason.
+Keep the reviewed CSV sources aligned afterwards: the next complete import of a
+list replaces it with exactly the CSV rows, so a person added only through the
+dashboard disappears from that list unless the CSV also includes them.
+
 Synthetic samples are in `examples`, with reserved `example.invalid` addresses.
 Do not import samples into the real event project.
 Import does not create Practitioners or check anyone in.
@@ -357,7 +386,8 @@ relationships and package identifiers.
 first, then bundles the synthetic `Person`, `Practitioner` and `List` examples from
 `fhir\fsh-generated\resources` into the app. In the browser, the real registration
 service runs against an in-memory store, so check-in, receipts, organizer dashboard,
-manual registration, corrections and CSV export all work. Data resets on reload. The
+manual registration, single roster additions/removals, corrections and CSV export
+all work. Data resets on reload. The
 IG example roster `synthetic-attendee-roster` is mapped to the event roster in memory.
 Staff sign-in accepts any credentials, and roster CSV import is disabled.
 Run `npm.cmd run dev:demo` to try it locally; add `#staff` to the URL for the
@@ -421,11 +451,13 @@ Before event day, also rehearse against the actual local Blaze server:
 1. Two simultaneous check-ins and a duplicate resubmission.
 2. A staff-only track lead and someone in both rosters.
 3. Manual registration, corrections, CSV export and reopening receipts.
-4. Blaze outage, internet outage, backend restart and PC reboot.
-5. Scan a real receipt using iPhone/Android, including long details; verify
+4. Adding a late sign-up to the attendee list from the dashboard, checking them
+   in from the attendee page, and removing a cancelled person from the list.
+5. Blaze outage, internet outage, backend restart and PC reboot.
+6. Scan a real receipt using iPhone/Android, including long details; verify
    saved text, offline scanning, original timestamp, and workstation clearing.
-6. Local workstation access; trusted HTTPS if offering phone-based registration.
-7. Private backup and restore to a separate test instance.
+7. Local workstation access; trusted HTTPS if offering phone-based registration.
+8. Private backup and restore to a separate test instance.
 
 ### Backup and restore of the host data directory
 

@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { tracks, type Candidate, type Confirmation, type Dashboard, type DashboardRow, type Details, type Role, type Selection } from '../shared/domain';
+import { rosterSourceLabels, tracks, type Candidate, type Confirmation, type Dashboard, type DashboardRow, type Details, type Role, type RosterChange, type RosterSource, type Selection, type StaffSelection } from '../shared/domain';
 import { api, DEMO, downloadDemoExport } from './api';
 import { Receipt } from './Receipt';
 import './styles.css';
@@ -115,6 +115,9 @@ function Staff() {
   const [role, setRole] = useState<Role | ''>('attendee');
   const [reason, setReason] = useState('');
   const [editing, setEditing] = useState<string>();
+  const [editingLists, setEditingLists] = useState<RosterSource[]>([]);
+  const [targetList, setTargetList] = useState<RosterSource>('roster');
+  const [searchVersion, setSearchVersion] = useState(0);
   const [requestId, setRequestId] = useState(() => crypto.randomUUID());
   const [csv, setCsv] = useState('');
   const [source, setSource] = useState('roster');
@@ -134,8 +137,21 @@ function Staff() {
       setError(message(err));
     });
   }, []);
-  function resetForm() { setEditing(undefined); setDetails(blank); setRole('attendee'); setReason(''); setRequestId(crypto.randomUUID()); }
-  function edit(row: DashboardRow) { setEditing(row.personId); setDetails(row); setRole(row.role); setReason(''); document.getElementById('participant-form')?.scrollIntoView({ behavior: 'smooth' }); }
+  function resetForm() { setEditing(undefined); setEditingLists([]); setDetails(blank); setRole('attendee'); setReason(''); setRequestId(crypto.randomUUID()); }
+  function edit(row: DashboardRow) { setEditing(row.personId); setEditingLists(row.lists); setDetails(row); setRole(row.role); setReason(''); document.getElementById('participant-form')?.scrollIntoView({ behavior: 'smooth' }); }
+  const listNames = (lists: RosterSource[]) => lists.length ? lists.map(list => rosterSourceLabels[list]).join(' and ') : 'neither list';
+  async function addToList(source: RosterSource) {
+    const result = await api<RosterChange>(`/staff/rosters/${source}/participants`, { ...details, role, reason });
+    setSearchVersion(version => version + 1);
+    setNotice(`${result.created ? 'Added' : 'Added the existing participant'} ${details.name} to the ${rosterSourceLabels[source]}. No check-in was recorded; they can now check in from the attendee page.`);
+  }
+  async function removeFromList(source: RosterSource) {
+    if (!editing) return;
+    if (reason.trim().length < 5) throw new Error('Enter a reason (at least 5 characters) before removing someone from a list.');
+    const result = await api<RosterChange>(`/staff/rosters/${source}/participants/${encodeURIComponent(editing)}`, { reason }, 'DELETE');
+    setSearchVersion(version => version + 1);
+    setNotice(`Removed ${details.name} from the ${rosterSourceLabels[source]}. Attendance history was kept. ${result.lists.length ? `They remain in the ${listNames(result.lists)}.` : 'They can no longer check in from the attendee page.'}`);
+  }
   const filtered = dashboard?.rows.filter(row => `${row.name} ${row.email} ${row.affiliation}`.toLowerCase().includes(filter.toLowerCase())) ?? [];
   if (receipt) return <main className="registration"><div className="card"><Receipt receipt={receipt} onDone={() => setReceipt(undefined)} /></div></main>;
   return <main className="staff">
@@ -174,15 +190,20 @@ function Staff() {
         </section>
       </>}
       <div className="staff-columns">
-        <section className="card"><Search staff onSelect={async candidate => {
-          const selected = await api<Selection & { id: string }>('/staff/select', { token: candidate.token });
-          setEditing(selected.id); setDetails(selected); setRole(''); setReason('');
-          setNotice('Confirm the organizer-reviewed role before saving. To record attendance, use the attendee check-in page.');
+        <section className="card"><Search key={searchVersion} staff onSelect={async candidate => {
+          const selected = await api<StaffSelection>('/staff/select', { token: candidate.token });
+          setEditing(selected.id); setEditingLists(selected.lists); setDetails(selected); setRole(''); setReason('');
+          setNotice(`${selected.name} is in the ${listNames(selected.lists)}. Confirm the organizer-reviewed role before saving. To record attendance, use the attendee check-in page.`);
         }} /></section>
         <form className="card" id="participant-form" onSubmit={event => {
           event.preventDefault();
+          const intent = ((event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null)?.value ?? '';
           void action(async () => {
-            if (editing) {
+            if (intent.startsWith('remove:')) {
+              await removeFromList(intent.slice(7) as RosterSource);
+            } else if (intent.startsWith('add:')) {
+              await addToList(intent.slice(4) as RosterSource);
+            } else if (editing) {
               await api(`/staff/participants/${editing}`, { ...details, role, reason }, 'PUT');
               setNotice('Details corrected. Attendance was not changed.');
             } else {
@@ -192,13 +213,32 @@ function Staff() {
             resetForm(); await refresh();
           });
         }}>
-          <h2>{editing ? 'Correct participant' : 'Manual registration'}</h2>
-          <p className="muted">Search both rosters first. Manual registration is only for someone missing from both.</p>
+          <h2>{editing ? 'Correct participant' : 'Manual registration or late sign-up'}</h2>
+          <p className="muted">Search both rosters first. Manual registration checks someone in who is missing from both. To add a last-minute sign-up without checking them in, use <strong>Add to list</strong>; they can then check in from the attendee page like everyone else.</p>
           <DetailsFields value={details} onChange={setDetails} />
           <label>Verified event role<select required value={role} onChange={e => setRole(e.target.value as Role | '')}><option value="">Select verified role</option><option value="attendee">Attendee / other staff</option><option value="track-lead">Track lead (verified)</option></select></label>
           <label>Reason (recorded in audit log)<textarea required minLength={5} maxLength={500} value={reason} onChange={e => setReason(e.target.value)} /></label>
-          <button disabled={busy}>{editing ? 'Save correction' : 'Register and check in'}</button>
-          <button type="button" className="secondary" disabled={busy} onClick={resetForm}>Clear / new manual registration</button>
+          {editing ? <>
+            <button disabled={busy} value="correct">Save correction</button>
+            <button type="button" className="secondary" disabled={busy} onClick={resetForm}>Clear / new manual registration</button>
+            <fieldset className="membership">
+              <legend>Roster membership</legend>
+              <p className="muted">Currently in the {listNames(editingLists)}. Removing keeps the person and any recorded check-in; it only stops roster-based check-in from that list. The reason above is recorded.</p>
+              <div className="membership-actions">
+                {(['roster', 'staff'] as const).map(source => editingLists.includes(source)
+                  ? <button key={source} formNoValidate className="secondary" disabled={busy} value={`remove:${source}`}>Remove from {rosterSourceLabels[source]}</button>
+                  : <button key={source} className="secondary" disabled={busy} value={`add:${source}`}>Add to {rosterSourceLabels[source]}</button>)}
+              </div>
+            </fieldset>
+          </> : <>
+            <button disabled={busy} value="manual">Register and check in</button>
+            <button type="button" className="secondary" disabled={busy} onClick={resetForm}>Clear form</button>
+            <fieldset className="membership">
+              <legend>Add to list without check-in</legend>
+              <label>List<select value={targetList} onChange={e => setTargetList(e.target.value as RosterSource)}><option value="roster">Attendee list (Google Sheet sign-ups)</option><option value="staff">Staff list (track leads and partners)</option></select></label>
+              <button className="secondary" disabled={busy} value={`add:${targetList}`}>Add to {rosterSourceLabels[targetList]}</button>
+            </fieldset>
+          </>}
         </form>
       </div>
       {!DEMO && <form className="card" onSubmit={event => {

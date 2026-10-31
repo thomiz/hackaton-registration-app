@@ -67,6 +67,11 @@ The repository, npm package and Compose project are also named
 Corrections update linked resources and roster roles transactionally and create
 AuditEvents. Manual registration creates a Person, Practitioner, marked check-in
 entry and audit atomically without adding to either expected roster.
+Single-participant roster additions and removals (`server/roster.ts`) update one
+roster List entry plus, for new people, a Person, in one transaction with an
+AuditEvent. They reuse the import's stable-ID generation and duplicate/role
+rules so that later complete CSV imports recognize the same Person, and they
+never overwrite details confirmed at check-in.
 
 The app uses typed resource builders and runtime input validation. Full profile
 conformance is checked against the generated package, not assumed from
@@ -113,7 +118,7 @@ If rendering fails, the persisted check-in remains valid and readable details,
 an explicit error and a retry button remain available. Persistence or retrieval
 failures never produce fabricated confirmation.
 
-Tests also cover imports, matching thresholds, roles, linked resources,
+Tests also cover imports, single roster additions/removals, matching thresholds, roles, linked resources,
 duplicate/concurrent arrivals, manual audit, API authorization, track changes,
 transaction failure, persisted receipts and Blaze request shapes.
 

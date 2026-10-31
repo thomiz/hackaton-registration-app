@@ -2,11 +2,12 @@
 // It runs the real RegistrationService against an in-memory store seeded with the IG examples.
 import { randomUUID } from 'node:crypto';
 import { z, ZodError } from 'zod';
-import { checkinSchema, detailsSchema, manualSchema, roleSchema, tracks } from '../../shared/domain';
+import { checkinSchema, detailsSchema, manualSchema, roleSchema, rosterEntrySchema, rosterRemovalSchema, rosterSourceSchema, tracks } from '../../shared/domain';
 import { checkinsCsv } from '../../shared/export';
 import { AppError } from '../../server/fhir';
 import { MemoryStore } from '../../server/memory-store';
 import { RegistrationService } from '../../server/registration';
+import { addRosterEntry, removeRosterEntry } from '../../server/roster';
 import { installBuffer } from './buffer';
 import { demoResources } from './seed';
 
@@ -39,6 +40,7 @@ async function route(method: string, path: string, body: unknown): Promise<unkno
   };
   const participant = url.pathname.match(/^\/staff\/participants\/([^/]+)$/);
   const receipt = url.pathname.match(/^\/staff\/receipts\/([^/]+)$/);
+  const rosterEntry = url.pathname.match(/^\/staff\/rosters\/([^/]+)\/participants(?:\/([^/]+))?$/);
   switch (`${method} ${url.pathname}`) {
     case 'GET /config': return { tracks, privacyUrl: '' };
     case 'GET /health': return { status: 'ok' };
@@ -67,7 +69,8 @@ async function route(method: string, path: string, body: unknown): Promise<unkno
     case 'POST /staff/select': {
       staff();
       const { token } = z.object({ token: z.string().max(2048) }).parse(body);
-      return { ...await service.select(token), id: service.verify(token, 'candidate') };
+      const id = service.verify(token, 'candidate');
+      return { ...await service.select(token), id, lists: await service.memberships(id) };
     }
     case 'POST /staff/manual': {
       const user = staff();
@@ -86,6 +89,18 @@ async function route(method: string, path: string, body: unknown): Promise<unkno
   if (receipt && method === 'GET') {
     staff();
     return service.receipt(idSchema.parse({ id: decodeURIComponent(receipt[1]!) }).id);
+  }
+  if (rosterEntry && method === 'POST' && !rosterEntry[2]) {
+    const user = staff();
+    const source = rosterSourceSchema.parse(rosterEntry[1]);
+    const input = rosterEntrySchema.parse(body);
+    return addRosterEntry(service, source, input, input.reason, user);
+  }
+  if (rosterEntry && method === 'DELETE' && rosterEntry[2]) {
+    const user = staff();
+    const source = rosterSourceSchema.parse(rosterEntry[1]);
+    const { id } = idSchema.parse({ id: decodeURIComponent(rosterEntry[2]) });
+    return removeRosterEntry(service, source, id, rosterRemovalSchema.parse(body).reason, user);
   }
   throw new AppError(404, 'API endpoint not found.');
 }

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Person } from 'fhir/r4';
+import type { AuditEvent, Person } from 'fhir/r4';
 import { importRoster, importRosters, previewRosters, verifyRosters, type ImportRow } from '../server/imports';
+import { addRosterEntry, removeRosterEntry, stableRosterId } from '../server/roster';
 import { MemoryStore } from './memory-store';
 import { RegistrationService } from '../server/registration';
 import { previewResetCheckins, resetCheckins } from '../server/reset-checkins';
@@ -94,6 +95,86 @@ describe('roster maintenance previews and atomic imports', () => {
     await expect(previewRosters(service, {})).rejects.toThrow('Select');
     await expect(previewRosters(service, { roster: [] })).rejects.toThrow();
     await expect(previewRosters(service, { roster: Array.from({ length: 501 }, (_, i) => ({ ...alice, id: `id-${i}` })) })).rejects.toThrow();
+  });
+});
+
+describe('single participant roster changes', () => {
+  const carol = { name: 'Carol Example', email: 'carol@example.invalid', affiliation: 'Example', track: '' as const, role: 'attendee' as const };
+  const audits = async () => (await store.search<AuditEvent>('AuditEvent', '')).map(a => a.entity?.[0]?.description);
+
+  it('adds a new person to the attendee list with the import-compatible ID, an audit and no check-in', async () => {
+    const result = await addRosterEntry(service, 'roster', carol, 'Late sign-up by email', 'organizer');
+    expect(result).toMatchObject({ created: true, id: stableRosterId(carol.name, carol.affiliation), lists: ['roster'] });
+    expect(await store.search('Practitioner', '')).toHaveLength(0);
+    expect((await service.dashboard()).totals).toMatchObject({ roster: 2, staff: 1, checkedIn: 0, rosterMissing: 2 });
+    expect(await audits()).toEqual(['Added to attendee list: Late sign-up by email']);
+    const [match] = await service.matches('Carol Example');
+    expect(match).toMatchObject({ name: 'Carol Example', alreadyCheckedIn: false });
+    const selected = await service.select(match!.token);
+    expect((await service.checkin(selected, selected.selection)).role).toBe('attendee');
+    // A later complete reimport recognizes the same person.
+    const preview = await previewRosters(service, { roster: [alice, { ...carol, id: stableRosterId(carol.name, carol.affiliation) }] });
+    expect(preview.rosters[0]).toMatchObject({ added: 0, confirmedDetailsPreserved: 1 });
+  });
+  it('reuses an existing person from the other list and rejects duplicates and role conflicts', async () => {
+    await importRoster(service, 'staff', [alice, bob]);
+    await expect(addRosterEntry(service, 'roster', { ...alice, role: 'attendee' }, 'Already there', 'organizer')).rejects.toThrow('already in the attendee list');
+    await expect(addRosterEntry(service, 'roster', { ...bob, role: 'attendee' }, 'Wrong role', 'organizer')).rejects.toThrow('listed as track-lead in the staff list');
+    const result = await addRosterEntry(service, 'roster', { ...bob, email: 'BOB@example.invalid' }, 'Also signed up', 'organizer');
+    expect(result).toMatchObject({ created: false, id: 'bob', lists: ['roster', 'staff'] });
+    expect(await store.search('Person', '')).toHaveLength(2);
+    expect((await service.dashboard()).totals).toMatchObject({ roster: 2, staff: 2 });
+    await verifyRosters(service, { roster: [alice, bob], staff: [alice, bob] });
+  });
+  it('does not overwrite confirmed details or role when re-adding a checked-in person', async () => {
+    const [match] = await service.matches('Alice');
+    const selected = await service.select(match!.token);
+    await service.checkin({ ...selected, track: 'care-plans' }, selected.selection);
+    const personId = (await store.search<Person>('Person', ''))[0]!.id!;
+    await removeRosterEntry(service, 'roster', personId, 'Cancelled', 'organizer');
+    await removeRosterEntry(service, 'staff', personId, 'Cancelled', 'organizer');
+    await expect(addRosterEntry(service, 'staff', { ...alice, role: 'track-lead' }, 'Promote', 'organizer')).rejects.toThrow('Confirmed role conflict');
+    await addRosterEntry(service, 'staff', { ...alice, track: 'fhir-101' }, 'Also helps at the desk', 'organizer');
+    await expect(addRosterEntry(service, 'roster', { ...alice, role: 'track-lead' }, 'Promote', 'organizer')).rejects.toThrow('listed as attendee in the staff list');
+    const person = (await store.search<Person>('Person', '')).find(p => p.identifier?.some(i => i.value === 'alice'))!;
+    expect(detailsOf(person).track).toBe('care-plans');
+    expect((await service.dashboard()).totals).toMatchObject({ roster: 0, staff: 1, checkedIn: 1, staffMissing: 0 });
+  });
+  it('removes a person from one list only, keeping the Person, the other list and attendance', async () => {
+    const [match] = await service.matches('Alice');
+    const selected = await service.select(match!.token);
+    const receipt = await service.checkin(selected, selected.selection);
+    const personId = (await store.search<Person>('Person', ''))[0]!.id!;
+    const result = await removeRosterEntry(service, 'roster', personId, 'Cancelled attendance', 'organizer');
+    expect(result).toMatchObject({ personId, id: 'alice', created: false, lists: ['staff'] });
+    expect(await audits()).toEqual(['Removed from attendee list: Cancelled attendance']);
+    expect((await service.dashboard()).totals).toMatchObject({ roster: 0, staff: 1, checkedIn: 1 });
+    expect((await service.dashboard()).rows[0]).toMatchObject({ lists: ['staff'] });
+    expect(await service.receipt(receipt.receiptId)).toMatchObject({ name: 'Alice Example' });
+    await expect(removeRosterEntry(service, 'roster', personId, 'Already removed', 'organizer')).rejects.toThrow('not in the attendee list');
+    await expect(removeRosterEntry(service, 'staff', 'missing-person', 'Unknown', 'organizer')).rejects.toThrow('not in the staff list');
+    await removeRosterEntry(service, 'staff', personId, 'Left the team', 'organizer');
+    expect(await service.matches('Alice')).toHaveLength(0);
+    expect(await store.search('Person', '')).toHaveLength(1);
+    expect((await service.dashboard()).rows[0]).toMatchObject({ lists: [] });
+  });
+  it('rejects a stale selection after removal and allows re-adding with the same identity', async () => {
+    await removeRosterEntry(service, 'staff', (await store.search<Person>('Person', ''))[0]!.id!, 'Not staff', 'organizer');
+    const [match] = await service.matches('Alice');
+    const selected = await service.select(match!.token);
+    const personId = (await store.search<Person>('Person', ''))[0]!.id!;
+    await removeRosterEntry(service, 'roster', personId, 'Cancelled', 'organizer');
+    await expect(service.checkin(selected, selected.selection)).rejects.toThrow('no longer exists');
+    const result = await addRosterEntry(service, 'roster', { ...alice, role: 'attendee' }, 'Un-cancelled', 'organizer');
+    expect(result).toMatchObject({ created: false, personId, id: 'alice', lists: ['roster'] });
+    expect(await store.search('Person', '')).toHaveLength(1);
+  });
+  it('leaves everything unchanged when the transaction fails', async () => {
+    const snapshot = structuredClone(store.resources);
+    store.fail = true;
+    await expect(addRosterEntry(service, 'roster', carol, 'Late sign-up', 'organizer')).rejects.toThrow('failure');
+    await expect(removeRosterEntry(service, 'roster', (await store.search<Person>('Person', ''))[0]!.id!, 'Cancelled', 'organizer')).rejects.toThrow('failure');
+    expect(store.resources).toEqual(snapshot);
   });
 });
 

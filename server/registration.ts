@@ -4,13 +4,15 @@ import type { AuditEvent, BundleEntry, List, Person, Practitioner } from 'fhir/r
 import { z } from 'zod';
 import {
   CANONICAL, EXT, ID_SYSTEM, LISTS, ROLE_SYSTEM, type Candidate, type Confirmation, type Dashboard,
-  type Details, type Role, type Selection, detailsSchema, roleSchema
+  type Details, type Role, type RosterSource, type Selection, detailsSchema, roleSchema
 } from '../shared/domain.js';
 import { AppError, FhirError, put, type FhirStore } from './fhir.js';
 import { detailsOf, emptyList, person, practitioner, refs, roleOf } from './model.js';
 
 export const normalize = (value: string): string => value.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim().replace(/\s+/g, ' ');
 export const letterCount = (value: string): number => (value.match(/\p{L}/gu) ?? []).length;
+export const membership = (lists: Record<RosterSource, List>, personId: string): RosterSource[] =>
+  (['roster', 'staff'] as const).filter(source => refs(lists[source]).includes(`Person/${personId}`));
 
 export class RegistrationService {
   constructor(public store: FhirStore, private secret: string) {}
@@ -88,6 +90,10 @@ export class RegistrationService {
     const resource = expected.find(item => item.id === id);
     if (!resource) throw new AppError(404, 'This entry is no longer in either roster. Please contact staff.');
     return { ...detailsOf(resource), selection: this.sign(id, 'checkin') };
+  }
+  async memberships(personId: string): Promise<RosterSource[]> {
+    const [roster, staff] = await Promise.all([this.list(LISTS.roster), this.list(LISTS.staff)]);
+    return membership({ roster, staff }, personId);
   }
   async expectedRole(id: string): Promise<Role> {
     const lists = await Promise.all([this.list(LISTS.roster), this.list(LISTS.staff)]);
@@ -207,7 +213,8 @@ export class RegistrationService {
       if (!expected?.id) throw new AppError(503, 'Checked-in Practitioner has no linked Person.');
       rows.push({
         ...detailsOf(item), id: item.id, personId: expected.id, role: roleOf(item), arrived: entry?.date ?? '',
-        manual: entry?.extension?.some(e => e.url === EXT.manual && e.valueBoolean) ?? false
+        manual: entry?.extension?.some(e => e.url === EXT.manual && e.valueBoolean) ?? false,
+        lists: membership({ roster, staff }, expected.id)
       });
     }
     const missing = async (list: List): Promise<number> => {

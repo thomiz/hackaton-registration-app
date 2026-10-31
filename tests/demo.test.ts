@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import * as shim from '../src/demo/node-crypto';
 import { DemoBuffer } from '../src/demo/buffer';
 import { demoApi, demoExportCsv, resetDemo } from '../src/demo/router';
-import type { Candidate, Confirmation, Dashboard, Selection } from '../shared/domain';
+import type { Candidate, Confirmation, Dashboard, RosterChange, Selection } from '../shared/domain';
 
 describe('demo node:crypto and Buffer shims', () => {
   it('match Node SHA-256 and HMAC-SHA-256', () => {
@@ -61,5 +61,16 @@ describe.skipIf(!existsSync('fhir/fsh-generated/resources'))('demo backend seede
     expect(after.totals.manual).toBe(before.totals.manual + 1);
     expect(await demoExportCsv()).toContain('Walk In');
     await expect(demoApi('/staff/import', { source: 'roster', csv: 'x' }, 'POST')).rejects.toThrow('not available in the demo');
+
+    const added = await demoApi<RosterChange>('/staff/rosters/roster/participants', {
+      name: 'Late Signup', email: 'late@example.invalid', affiliation: 'Synthetic late org', track: '', role: 'attendee', reason: 'Demo late sign-up'
+    }, 'POST');
+    expect(added).toMatchObject({ created: true, lists: ['roster'] });
+    expect((await demoApi<Dashboard>('/staff/dashboard', undefined, 'GET')).totals.roster).toBe(after.totals.roster + 1);
+    const [late] = await demoApi<Candidate[]>('/matches?name=Late+Signup', undefined, 'GET');
+    expect(late).toMatchObject({ name: 'Late Signup', alreadyCheckedIn: false });
+    const removed = await demoApi<RosterChange>(`/staff/rosters/roster/participants/${added.personId}`, { reason: 'Demo cancellation' }, 'DELETE');
+    expect(removed.lists).toEqual([]);
+    expect(await demoApi<Candidate[]>('/matches?name=Late+Signup', undefined, 'GET')).toEqual([]);
   });
 });

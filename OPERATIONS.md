@@ -213,6 +213,34 @@ Keep Blaze running. Previews can run while the app is open, but schedule applyin
 changes when nobody is checking in. The ops apply workflow below requires the
 app to be stopped and takes its own fresh backup.
 
+### Single last-minute changes from the dashboard
+
+For one person at a time (a late sign-up, a cancellation, or a staff member who
+also signed up as an attendee), use the staff dashboard instead of a reimport.
+The app can stay running and nobody else is affected.
+
+* **Add someone:** open **Staff access**, fill in the *Manual registration or
+  late sign-up* form (name, email, affiliation, track, verified role, reason),
+  choose the list under **Add to list without check-in** and press **Add to
+  attendee list** (or **staff list**). This does **not** check the person in;
+  they check in from the attendee page like everyone else. If the person
+  already exists in the other list, the existing record is reused and the roles
+  must agree.
+* **Remove someone:** search for the person in the staff search (or press
+  **Correct details** in the arrivals table), enter a reason and press
+  **Remove from attendee list** or **Remove from staff list** under *Roster
+  membership*. Only that list entry is removed: the person, any recorded
+  check-in, receipt and export rows are kept, exactly as if the latest CSV no
+  longer contained the row. Someone removed from both lists can no longer use
+  roster-based check-in.
+
+Both actions are recorded as AuditEvents with the staff username and reason,
+and the roster totals update immediately. **Afterwards, update the reviewed
+CSV sources to match**: the next complete import of a list replaces it with
+exactly the CSV rows, so a dashboard-only addition disappears again unless the
+CSV includes that person (use the same name and affiliation, or the generated
+`id`), and a dashboard-only removal is undone if the CSV still lists them.
+
 ### Attendee list changes
 
 1. Export the latest Google Forms attendee CSV. Save it in a private location,
