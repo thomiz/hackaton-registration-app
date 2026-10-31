@@ -30,6 +30,10 @@ export class MemoryStore implements FhirStore {
     return structuredClone(items) as T[];
   }
   async transaction(entries: BundleEntry[]): Promise<void> {
+    this.resources = this.apply(entries);
+  }
+  /** Validates a transaction against the current resources and returns the resulting state without committing it. */
+  protected apply(entries: BundleEntry[]): Map<string, Resource> {
     if (this.fail) throw new FhirError(503, 'Injected transaction failure.');
     if (this.conflicts > 0) { this.conflicts--; throw new FhirError(409, 'Injected conflict.'); }
     const deletions = new Set(entries.filter(entry => entry.request?.method === 'DELETE').map(entry => entry.request!.url));
@@ -46,6 +50,7 @@ export class MemoryStore implements FhirStore {
       }
     }
     const pending = new Map(this.resources);
+    const now = new Date().toISOString();
     const aliases = new Map<string, string>();
     const creations = new Map<BundleEntry, string>();
     for (const entry of entries) {
@@ -80,9 +85,9 @@ export class MemoryStore implements FhirStore {
       const key = `${resource.resourceType}/${resource.id}`;
       const existing = pending.get(key);
       if (entry.request?.ifMatch && entry.request.ifMatch !== `W/"${existing?.meta?.versionId}"`) throw new FhirError(409, 'Version conflict.');
-      resource.meta = { ...resource.meta, versionId: String(Number(existing?.meta?.versionId ?? 0) + 1) };
+      resource.meta = { ...resource.meta, versionId: String(Number(existing?.meta?.versionId ?? 0) + 1), lastUpdated: now };
       pending.set(key, resource);
     }
-    this.resources = pending;
+    return pending;
   }
 }

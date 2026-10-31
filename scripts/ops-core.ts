@@ -1,33 +1,33 @@
-import { createHash } from 'node:crypto';
-import { access, statfs, unlink } from 'node:fs/promises';
+import { access, mkdir, readFile, stat, statfs, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { Practitioner } from 'fhir/r4';
-import { ZodError } from 'zod';
-import { BlazeStore, resourceFingerprint } from '../server/fhir.js';
+import { z, ZodError } from 'zod';
+import { loadConfig, repositoryRoot, type Config } from '../server/config.js';
+import { JsonFileStore, parseSnapshot, readStore, sha256, storePaths } from '../server/file-store.js';
 import { importRosters, previewRosters, verifyRosters, type RosterUpdates } from '../server/imports.js';
+import { MemoryStore } from '../server/memory-store.js';
 import { RegistrationService } from '../server/registration.js';
 import { previewResetCheckins, resetCheckins } from '../server/reset-checkins.js';
-import {
-  applicationState, appPortOpen, assertApplicationStopped, assertMaintenanceComplete, pendingOperation,
-  readOptionalFile, requestApplicationStop, withOperationLock, writePrivateJson, type PendingOperation
-} from '../server/operations-runtime.js';
 import { startApplication } from '../server/startup.js';
-import { LISTS } from '../shared/domain.js';
-import { backupDatabase, backupRecordSchema, type BackupRecord } from './ops-backup.js';
-import { applicationHealth, canonicalFhirUrl, LocalBlaze, waitFor, type BlazeController, type OperationsEnvironment } from './ops-platform.js';
 
 export interface MaintenanceRequest { resetCheckins: boolean; rosters: RosterUpdates }
 export interface MaintenancePreview {
-  action: string;
-  operationKey: string;
-  fingerprint: string;
+  action: 'reset' | 'import' | 'reset-and-import';
   reset: boolean;
   checkins: number;
   eventRecords: number;
   rosters: Awaited<ReturnType<typeof previewRosters>>['rosters'];
   confirmation: string;
 }
-const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+export const backupRecordSchema = z.object({
+  createdAt: z.string(), file: z.string(), source: z.string(), sha256: z.string(), bytes: z.number(), resources: z.number()
+});
+export type BackupRecord = z.infer<typeof backupRecordSchema>;
+export interface OperationsEnvironment { root: string; config: Config }
+
+export function loadOperationsEnvironment(root = repositoryRoot): OperationsEnvironment {
+  return { root, config: loadConfig() };
+}
+
 export function errorMessage(error: unknown): string {
   if (error instanceof ZodError) return `Invalid input: ${error.issues.map(issue => `${issue.path.join('.') || 'input'} (${issue.code})`).join('; ')}`;
   if (error instanceof Error && 'code' in error && typeof error.code === 'string' && error.code.startsWith('CSV_')) {
@@ -35,18 +35,24 @@ export function errorMessage(error: unknown): string {
   }
   return error instanceof Error ? error.message : 'Unknown error';
 }
-type BackupAction = typeof backupDatabase;
+
+export function localAppUrl(config: Config): string {
+  const host = config.host === '0.0.0.0' ? '127.0.0.1' : config.host === '::' ? '[::1]' : config.host;
+  return `http://${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}:${config.port}`;
+}
+
+export async function appHealth(config: Config, fetcher: typeof fetch = fetch): Promise<{ ok: boolean; detail: string }> {
+  try {
+    const response = await fetcher(`${localAppUrl(config)}/api/health`, { signal: AbortSignal.timeout(3000) });
+    return response.ok ? { ok: true, detail: 'Healthy' } : { ok: false, detail: `HTTP ${response.status}` };
+  } catch { return { ok: false, detail: 'Not running or not responding' }; }
+}
 
 export class Operations {
-  readonly service: RegistrationService;
-  readonly blaze: BlazeController;
-  constructor(
-    readonly environment: OperationsEnvironment, blaze?: BlazeController, service?: RegistrationService,
-    private createBackup: BackupAction = backupDatabase
-  ) {
-    this.blaze = blaze ?? new LocalBlaze(environment);
-    this.service = service ?? new RegistrationService(new BlazeStore(environment.config.fhir), environment.config.sessionSecret);
-  }
+  constructor(readonly environment: OperationsEnvironment) {}
+  get paths() { return storePaths(this.environment.config.dataDir); }
+  defaultBackupDirectory() { return join(this.paths.directory, 'backups'); }
+  private service(store: MemoryStore) { return new RegistrationService(store, this.environment.config.sessionSecret); }
 
   async status() {
     const errors: string[] = [];
@@ -54,94 +60,68 @@ export class Operations {
       try { return await action(); }
       catch (error) { errors.push(`${label}: ${errorMessage(error)}`); return undefined; }
     };
-    const paths = this.environment.paths;
-    const directory = await capture('Database directory', () => this.blaze.dataDirectory());
-    const container = await capture('Docker/Blaze', async () => {
-      const current = await this.blaze.inspect();
-      if (!current) throw new Error('No Blaze container exists.');
-      await this.blaze.validateContainer(current);
-      return current;
+    const { config } = this.environment;
+    const app = await appHealth(config);
+    if (!app.ok) errors.push(`App: ${app.detail}`);
+    const data = await capture('Data file', async () => {
+      const info = await stat(this.paths.file).catch(() => undefined);
+      return info ? { bytes: info.size, modified: info.mtime.toISOString() } : undefined;
     });
-    const blazeHealth = container?.State.Running && container.State.Health?.Status === 'healthy'
-      ? await this.blaze.health()
-      : { ok: false, detail: container ? `Container ${container.State.Status}, health ${container.State.Health?.Status ?? 'unavailable'}` : 'Container unavailable' };
-    if (!blazeHealth.ok) errors.push(`Blaze health: ${blazeHealth.detail}`);
-    const app = await capture('Application control', () => applicationState(paths));
-    const appHealth = await applicationHealth(this.environment.config);
-    if (!appHealth.ok) errors.push(`App health: ${appHealth.detail}`);
-    const pending = await capture('Maintenance journal', () => pendingOperation(paths));
-    if (pending) errors.push(`Unfinished ${pending.action} (${pending.stage}); keep the app stopped.`);
-    const backup = await capture('Last backup', async () => {
-      const raw = await readOptionalFile(paths.backupFile);
+    const lock = await readFile(this.paths.lock, 'utf8').then(text => JSON.parse(text) as { pid: number; purpose: string; since: string }).catch(() => undefined);
+    const disk = await capture('Disk space', async () => {
+      const value = await statfs(this.paths.directory);
+      return { freeBytes: value.bavail * value.bsize };
+    });
+    const lastBackup = await capture('Last backup', async () => {
+      const raw = await readFile(join(this.paths.directory, 'last-backup.json'), 'utf8').catch(() => undefined);
       if (!raw) return undefined;
       const record = backupRecordSchema.parse(JSON.parse(raw));
-      await access(join(record.directory, 'backup.json'));
-      if (directory && record.source !== directory) throw new Error('The recorded backup is for a different database directory.');
+      await access(record.file);
       return { ...record, ageHours: Math.max(0, (Date.now() - Date.parse(record.createdAt)) / 3600000) };
     });
-    const disk = directory ? await capture('Disk space', async () => {
-      const value = await statfs(directory);
-      return { freeBytes: value.bavail * value.bsize };
-    }) : undefined;
-    const attendance = blazeHealth.ok ? await capture('Attendance counts', async () => {
-      const { totals, tracks } = await this.service.dashboard();
+    const attendance = data ? await capture('Attendance counts', async () => {
+      const service = this.service(await readStore(config.dataDir));
+      const { totals, tracks } = await service.dashboard();
       return { totals, tracks };
     }) : undefined;
-    const ready = errors.length === 0 && !!container?.State.Running && container.State.Health?.Status === 'healthy';
     return {
-      ready, node: process.version, appUrl: this.environment.config.publicUrl, fhirUrl: this.environment.config.fhir.baseUrl,
-      databaseDirectory: directory, blaze: { state: container?.State.Status ?? 'unknown', health: blazeHealth },
-      app: { ...app, health: appHealth }, disk, lastBackup: backup, pending, attendance, errors
+      ready: errors.length === 0, node: process.version, appUrl: config.publicUrl, dataFile: this.paths.file,
+      data, lock, app, disk, lastBackup, attendance, errors
     };
   }
 
-  async start(blazeOnly = false) {
-    const { paths, config, root } = this.environment;
-    return withOperationLock(paths, async () => {
-      if (!blazeOnly) await assertMaintenanceComplete(paths);
-      await assertApplicationStopped(paths, config);
-      if (!blazeOnly) {
-        try { await access(join(root, 'dist', 'index.html')); }
-        catch (error) { throw new Error(`The built UI is unavailable. Run "npm run build" before startup. ${errorMessage(error)}`); }
-      }
-      await this.blaze.start();
-      if (blazeOnly) return undefined;
-      const running = await startApplication(config, paths, true, this.service.store);
-      try { await waitFor(() => applicationHealth(config), 'Check-in application', 30000); }
-      catch (error) { await running.close(); throw error; }
-      return running;
-    });
+  async start() {
+    try { await access(join(this.environment.root, 'dist', 'index.html')); }
+    catch { throw new Error('The built UI is unavailable. Run "npm run build" before startup.'); }
+    return startApplication(this.environment.config);
   }
 
-  async stop(appOnly = false): Promise<void> {
-    const { paths, config } = this.environment;
-    await withOperationLock(paths, async () => {
-      await requestApplicationStop(paths);
-      await waitFor(async () => ({
-        ok: !(await applicationState(paths)) && !(await appPortOpen(config)),
-        detail: 'The application is still listening or a manual app must be stopped with Ctrl+C'
-      }), 'Application shutdown', 30000);
-      if (!appOnly) await this.blaze.stop();
-    });
+  /** Copies the current snapshot. Safe while the app runs, because the app replaces the file atomically. */
+  async backup(directory = this.defaultBackupDirectory()): Promise<BackupRecord | undefined> {
+    let data: Buffer;
+    try { data = await readFile(this.paths.file); }
+    catch (error) {
+      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined;
+      throw error;
+    }
+    const resources = parseSnapshot(data.toString('utf8')).size;
+    await mkdir(directory, { recursive: true });
+    const createdAt = new Date().toISOString();
+    const file = join(directory, `fhir-store-${createdAt.replace(/[:.]/g, '-')}.json`);
+    await writeFile(file, data, { flag: 'wx', mode: 0o600 });
+    const digest = sha256(data);
+    if (sha256(await readFile(file)) !== digest) throw new Error(`The backup copy ${file} could not be verified.`);
+    const record: BackupRecord = { createdAt, file, source: this.paths.file, sha256: digest, bytes: data.length, resources };
+    await writeFile(join(this.paths.directory, 'last-backup.json'), JSON.stringify(record, null, 2), { mode: 0o600 });
+    return record;
   }
 
-  async backup(directory: string): Promise<BackupRecord> {
-    return withOperationLock(this.environment.paths, async () => {
-      await assertApplicationStopped(this.environment.paths, this.environment.config);
-      return this.createBackup(this.environment, this.blaze, directory);
-    });
-  }
-
-  private async plan(request: MaintenanceRequest): Promise<MaintenancePreview> {
+  private async plan(service: RegistrationService, request: MaintenanceRequest): Promise<MaintenancePreview> {
     const hasImports = Object.values(request.rosters).some(rows => rows !== undefined);
     if (!request.resetCheckins && !hasImports) throw new Error('Select at least one roster or a check-in reset.');
-    const reset = await previewResetCheckins(this.service);
-    const imports = hasImports ? await previewRosters(this.service, request.rosters, request.resetCheckins) : undefined;
-    const operationKey = hash({
-      database: await this.blaze.dataDirectory(), fhir: canonicalFhirUrl(this.environment.config.fhir.baseUrl),
-      reset: request.resetCheckins, roster: request.rosters.roster ?? null, staff: request.rosters.staff ?? null
-    });
-    const action = request.resetCheckins ? hasImports ? 'reset-and-import' : 'reset' : 'import';
+    await service.initialize();
+    const reset = await previewResetCheckins(service);
+    const imports = hasImports ? await previewRosters(service, request.rosters, request.resetCheckins) : undefined;
     const confirmations: string[] = [];
     if (request.resetCheckins) confirmations.push(`RESET ${reset.checkedIn} CHECK-INS AND ${reset.practitioners} EVENT RECORDS`);
     if (imports) {
@@ -149,80 +129,41 @@ export class Operations {
       confirmations.push(`REMOVE ${imports.rosters.reduce((total, r) => total + r.removed, 0)} ROSTER MEMBERSHIPS`);
     }
     return {
-      action, operationKey,
-      fingerprint: hash([operationKey, reset.fingerprint, imports?.fingerprint]), reset: request.resetCheckins,
-      checkins: reset.checkedIn, eventRecords: reset.practitioners, rosters: imports?.rosters ?? [],
-      confirmation: confirmations.join('; ')
+      action: request.resetCheckins ? hasImports ? 'reset-and-import' : 'reset' : 'import',
+      reset: request.resetCheckins, checkins: reset.checkedIn, eventRecords: reset.practitioners,
+      rosters: imports?.rosters ?? [], confirmation: confirmations.join('; ')
     };
   }
 
+  /** Read-only: works on an in-memory copy and may run while the app is running. */
   async preview(request: MaintenanceRequest): Promise<MaintenancePreview> {
-    return withOperationLock(this.environment.paths, async () => {
-      await this.blaze.requireHealthy();
-      return this.plan(request);
-    });
-  }
-
-  private async preservedResources(request: MaintenanceRequest): Promise<string> {
-    const resources = await Promise.all((['roster', 'staff'] as const).filter(source => request.rosters[source] === undefined)
-      .map(source => this.service.list(LISTS[source])));
-    return resourceFingerprint([
-      ...resources,
-      ...(!request.resetCheckins ? [
-        await this.service.list(LISTS.checkins), ...await this.service.store.search<Practitioner>('Practitioner', '_count=200')
-      ] : [])
-    ]);
+    return this.plan(this.service(await readStore(this.environment.config.dataDir)), request);
   }
 
   async apply(
-    request: MaintenanceRequest, backupDirectory: string, confirm: (preview: MaintenancePreview) => Promise<string>
-  ): Promise<{ preview: MaintenancePreview; backup: BackupRecord }> {
-    const { paths, config } = this.environment;
-    return withOperationLock(paths, async () => {
-      await assertApplicationStopped(paths, config);
-      await this.blaze.requireHealthy();
-      const preview = await this.plan(request);
-      const pending = await pendingOperation(paths);
-      if (pending && pending.operationKey !== preview.operationKey) {
-        throw new Error(`Unfinished ${pending.action}: retry the same operation with the same reviewed inputs first. Original backup: ${pending.backup}`);
-      }
+    request: MaintenanceRequest, backupDirectory: string | undefined, confirm: (preview: MaintenancePreview) => Promise<string>
+  ): Promise<{ preview: MaintenancePreview; backup?: BackupRecord }> {
+    // Holding the store lock guarantees the app is stopped and nothing else writes during maintenance.
+    const store = await JsonFileStore.open(this.environment.config.dataDir, 'ops maintenance');
+    try {
+      const draft = new MemoryStore();
+      draft.resources = store.resources;
+      const preview = await this.plan(this.service(draft), request);
       if (await confirm(preview) !== preview.confirmation) throw new Error('Confirmation did not match. No backup, reset or import was performed.');
-      const backup = await this.createBackup(this.environment, this.blaze, backupDirectory);
-      await this.blaze.requireHealthy();
-      await assertApplicationStopped(paths, config);
-      if ((await this.plan(request)).fingerprint !== preview.fingerprint) {
-        throw new Error('The database changed after confirmation. No reset or import was performed; review a fresh preview.');
-      }
-      const preserved = await this.preservedResources(request);
-      const journal: PendingOperation = {
-        operationKey: preview.operationKey, action: preview.action, stage: 'prepared',
-        startedAt: pending?.startedAt ?? new Date().toISOString(), backup: pending?.backup ?? backup.directory
-      };
-      await writePrivateJson(paths.pendingFile, journal);
-      try {
+      const backup = await this.backup(backupDirectory);
+      const service = this.service(store);
+      // One atomic write: on any failure the data file is left exactly as it was.
+      await store.batch(async () => {
+        await service.initialize();
+        if (request.resetCheckins) await resetCheckins(service);
+        if (preview.rosters.length) await importRosters(service, request.rosters);
         if (request.resetCheckins) {
-          journal.stage = 'reset';
-          await writePrivateJson(paths.pendingFile, journal);
-          await resetCheckins(this.service);
+          const after = await previewResetCheckins(service);
+          if (after.checkedIn !== 0 || after.practitioners !== 0) throw new Error('Reset verification found remaining check-in records.');
         }
-        if (preview.rosters.length) {
-          journal.stage = 'import';
-          await writePrivateJson(paths.pendingFile, journal);
-          await importRosters(this.service, request.rosters);
-        }
-        journal.stage = 'verification';
-        await writePrivateJson(paths.pendingFile, journal);
-        if (request.resetCheckins) {
-          const reset = await previewResetCheckins(this.service);
-          if (reset.checkedIn !== 0 || reset.practitioners !== 0) throw new Error('Reset verification found remaining check-in records.');
-        }
-        await verifyRosters(this.service, request.rosters);
-        if (await this.preservedResources(request) !== preserved) throw new Error('Unselected rosters or preserved attendance changed unexpectedly.');
-        await unlink(paths.pendingFile);
-      } catch (error) {
-        throw new Error(`Maintenance stopped during ${journal.stage}. Keep the app stopped and retry the same ops command. Original backup: ${journal.backup}. ${errorMessage(error)}`);
-      }
+        await verifyRosters(service, request.rosters);
+      });
       return { preview, backup };
-    });
+    } finally { await store.close(); }
   }
 }

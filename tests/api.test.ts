@@ -10,7 +10,7 @@ import type { Selection } from '../shared/domain';
 const salt = '0123456789abcdef0123456789abcdef';
 export const config: Config = {
   host: '127.0.0.1', port: 8080, publicUrl: 'http://localhost:8080', privacyUrl: 'https://example.invalid/privacy',
-  fhir: { baseUrl: 'http://localhost:8090/fhir' },
+  dataDir: 'unused-in-memory',
   sessionSecret: 'only-for-tests-secret-at-least-32-characters',
   staffUsername: 'organizer', staffPasswordHash: `${salt}:${scryptSync('test-password', salt, 64).toString('hex')}`
 };

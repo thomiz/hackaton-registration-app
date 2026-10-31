@@ -1,7 +1,5 @@
 [CmdletBinding()]
-param(
-    [switch]$SkipImages
-)
+param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -25,14 +23,8 @@ try {
         & npm.cmd run configure
         if ($LASTEXITCODE -ne 0) { throw 'Initial configuration failed.' }
     }
-    & docker.exe compose config --quiet
-    if ($LASTEXITCODE -ne 0) { throw 'Deployment configuration validation failed.' }
-    if (-not $SkipImages) {
-        & docker.exe compose pull
-        if ($LASTEXITCODE -ne 0) { throw 'Blaze FHIR server image download failed.' }
-    }
     Write-Host 'Dependencies and build artifacts are installed. Services have not been started.'
-    Write-Host 'Follow README.md to create the Blaze host data directory, start Blaze and verify application health.'
+    Write-Host 'Start the app with: npm.cmd run ops -- start'
 } finally {
     Pop-Location
 }

@@ -52,12 +52,6 @@ $requirements = @(
         Package = 'OpenJS.NodeJS.LTS'
         FallbackPaths = @("$env:ProgramFiles\nodejs\node.exe")
     }
-    @{
-        Label = 'Docker Desktop'
-        Name = 'docker.exe'
-        Package = 'Docker.DockerDesktop'
-        FallbackPaths = @("$env:ProgramFiles\Docker\Docker\resources\bin\docker.exe")
-    }
 )
 
 $missing = @()
@@ -110,20 +104,7 @@ if (-not $npm) { throw 'npm is missing. Repair the Node.js LTS installation and 
 & $npm --version
 if ($LASTEXITCODE -ne 0) { throw 'npm could not run.' }
 
-$docker = Find-Executable -Name 'docker.exe' -FallbackPaths $requirements[2].FallbackPaths
-& $docker compose version
-if ($LASTEXITCODE -ne 0) { throw 'Docker Compose is unavailable. Repair Docker Desktop and rerun.' }
 
-& $docker info
-if ($LASTEXITCODE -ne 0) {
-    throw 'Docker engine is not ready. Start Docker Desktop, complete its WSL 2 setup, switch to Linux containers, and rerun. See README.md for restart and licensing requirements.'
-}
-$containerOS = & $docker info --format '{{.OSType}}'
-if ($LASTEXITCODE -ne 0) { throw 'Could not verify the Docker container platform.' }
-if (($containerOS -join '').Trim() -ne 'linux') {
-    throw 'Docker Desktop must use Linux containers for the planned Blaze deployment.'
-}
-
-Write-Host 'Windows prerequisites are available and the Docker Linux engine is responsive.'
-Write-Host 'Next run scripts\Install-App.ps1 to install locked application dependencies and pull the Blaze image.'
-Write-Host 'No npm packages, Blaze images, databases, or application services have been installed or started by this prerequisite script.'
+Write-Host 'Windows prerequisites are available.'
+Write-Host 'Next run scripts\Install-App.ps1 to install locked application dependencies and build the app.'
+Write-Host 'No npm packages, data or application services have been installed or started by this prerequisite script.'

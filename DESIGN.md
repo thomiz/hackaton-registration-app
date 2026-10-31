@@ -9,49 +9,53 @@ The planning specification remains in the event repository at
 `Norwegian-FHIR-hackathon-2026/planlegging/registreringsapp.md`.
 All application and application-specific FHIR sources live here.
 
-The application uses a React/TypeScript frontend, a Fastify backend and a local
-Blaze FHIR R4 server. Blaze is the only container; its standalone RocksDB storage
-needs no separate database, cache or administration application. Browsers talk
-only to the check-in backend. Blaze is unauthenticated and restricted to
-loopback.
+The application uses a React/TypeScript frontend and a Fastify backend that
+stores FHIR R4 resources in a local JSON file. There is no separate database,
+FHIR server, container or administration application. Browsers talk only to
+the check-in backend.
 
-All dashboard data comes from FHIR. There is no production memory fallback or
-automatic success response when persistence is unavailable. Tests use a
-test-only versioned in-memory FHIR adapter.
+All dashboard data comes from the stored FHIR resources. There is no automatic
+success response when persistence fails.
 
 ## Storage and transactions
 
-Blaze stores data at `/app/data`, bind-mounted to `BLAZE_DATA_DIR` on the host.
-Database files remain outside Docker images, container layers and named volumes
-and can be backed up with ordinary file tools while Blaze is stopped.
-Blaze creates its `index`, `transaction`, `resource` and admin subdirectories on
-first start.
+`server/file-store.ts` implements the same small `FhirStore` interface
+(read, search, transaction) that earlier versions implemented against Blaze.
+All resources are held in memory and saved as one FHIR `collection` Bundle in
+`DATA_DIR/fhir-store.json`. Expected event load is a few hundred participants,
+so the whole file (well under a few MB) is rewritten for each transaction.
 
-Docker Desktop shares Windows paths into the WSL 2 VM, which is slower than a
-Docker volume for RocksDB. Expected event load is a few hundred attendees.
-For better I/O while keeping files outside Docker, operators can use a WSL ext4
-path such as `\\wsl$\Ubuntu\home\<user>\blaze-data`, create it inside WSL and
-assign ownership to UID/GID 1001. Include that directory in backups.
+* **Atomicity and durability.** A transaction is validated against an in-memory
+  copy, written to a temporary file, flushed to disk and renamed over the
+  previous snapshot before it becomes visible. A crash leaves the old or the
+  new file, never a mix. Renames are retried briefly when Windows antivirus or
+  indexing tools hold the file.
+* **Concurrency.** Node handles requests on one thread; transactions are queued
+  so each one sees the result of the previous one. Updates carry `If-Match`
+  versions and the registration service retries the whole operation after a
+  version conflict, so simultaneous arrivals are never lost. Creates use
+  conditional `ifNoneExist` on the stable identifier, which makes repeated
+  submissions idempotent. Deletes are refused while other resources still
+  reference the target.
+* **Single writer.** `fhir-store.lock` (with the owner PID) prevents a second
+  app or maintenance command from opening the same data. A lock whose process
+  no longer exists is replaced automatically.
+* **Maintenance batches.** Operations CLI changes (reset, imports, and both
+  combined) run as a batch that is written once at the end or discarded
+  entirely, so no maintenance journal is needed.
+* **Reads and backups.** Search and the dashboard read memory. Because the file
+  is only ever replaced atomically, it can be copied or read by `ops status`
+  and `ops backup` while the app runs.
 
-The backend creates new resources with conditional POSTs (`ifNoneExist` on the
-stable identifier) and transaction-local `urn:uuid` references; Blaze assigns
-resource IDs. Stable identifiers provide idempotency. Existing resources are
-updated with `If-Match`; the entire check-in transaction is retried after version
-conflicts (HTTP 409/412). Blaze executes transactions atomically and serially.
-Referential integrity requires references to existing resources or entries in
-the same transaction.
-
-List names in the planning specification are logical identifiers, not literal
-Blaze resource IDs. Search pagination is followed; List entries are read as a
-whole. Blaze uses `BASE_URL` for absolute paging links, and the backend rejects
-paging links outside `FHIR_BASE_URL`.
-
+Resource history is not kept; the current versions, AuditEvents and backups
+form the record. The stored resources are unchanged from the Blaze-based
+versions, so the file can be loaded into any FHIR server if needed.
 ## FHIR model and validation
 
 The IG title and package ID are `hackathon-check-in-app`, with
 canonical URL `https://hl7.no/fhir/ig/hackathon-check-in-app`.
 Its FHIR machine-readable name is `HackathonCheckInApp`.
-The repository, npm package and Compose project are also named
+The repository and npm package are also named
 `hackathon-check-in-app`. The app and IG release version is `0.7.0`.
 
 * Persons represent expected participants and use the event participant
@@ -120,29 +124,39 @@ failures never produce fabricated confirmation.
 
 Tests also cover imports, single roster additions/removals, matching thresholds, roles, linked resources,
 duplicate/concurrent arrivals, manual audit, API authorization, track changes,
-transaction failure, persisted receipts and Blaze request shapes.
+transaction failure, persisted receipts, the JSON file store (atomic writes,
+locking, concurrent writers, batches) and the operations CLI.
 
 ## Legacy deployment upgrades
 
 These steps apply only to deployments running older versions. For a new
 installation, follow the [README setup instructions](README.md#windows-setup).
 
+### Replacing Blaze with the JSON data file
+
+Versions up to this change used a Blaze FHIR server in Docker. Stop the app,
+then either run `npm.cmd run migrate:blaze` while the old Blaze container is
+still running (see the [README](README.md#migrating-from-an-earlier-blaze-installation)),
+or start with an empty `DATA_DIR` and reimport the reviewed rosters. Then
+remove `FHIR_BASE_URL` and `BLAZE_DATA_DIR` from `.env` (they are ignored),
+stop the Blaze container with `docker compose stop` from the previous
+checkout, and keep its data directory as an archive until retention ends.
+The ops `stop` command, maintenance journal and cold Blaze backups no longer
+exist: stop the app with Ctrl+C, and use `ops backup`.
+
 ### Upgrading to 0.6.0
 
 The app and FHIR IG now use `hackathon-check-in-app`. This release changes the
 FHIR canonical namespace, including profile URLs, extensions, terminology and
-identifier systems. Existing Blaze resources are not migrated automatically;
+identifier systems. Existing resources are not migrated automatically;
 the new app will not find old rosters or check-ins by their previous identifiers.
 
-Before upgrading, stop the app and stop Blaze with `docker compose stop` using
-the old Compose project configuration. The renamed Compose project otherwise
-creates a separate container that can conflict on port 8090 or the same Blaze
-data directory. Back up `BLAZE_DATA_DIR` while Blaze is stopped.
+Before upgrading, stop the app and back up the data used by the old version.
 
 If existing attendance must be retained, migrate the old app-specific canonical
 URLs in the saved resources to the new namespace and validate the migrated data
 before restarting the app. Do not mix old and new namespaces in a live database.
-For a rehearsal with no attendance to retain, use a new Blaze data directory and
+For a rehearsal with no attendance to retain, use a new, empty data directory and
 reimport the reviewed rosters instead; keep the backup.
 
 Rebuild the FHIR definitions and package from clean generated output so the
@@ -164,26 +178,12 @@ FHIR storage.
 Rebuild the FHIR definitions/package in a clean generated-output directory so
 obsolete email profiles, extensions, terminology and examples are not retained.
 
-### Migrating from Medplum to Blaze
+### Migrating from Medplum
 
-Earlier versions stored data in Medplum (PostgreSQL/Redis Docker volumes). The
-app now talks only to Blaze; data is **not** migrated automatically and a new
-Blaze database starts empty.
-
-1. Stop the old application and run `docker compose stop` with the *old*
-   `compose.yaml` before upgrading. Do not run `docker compose down -v`;
-   keep the old volumes until retention/deletion is approved.
-2. Remove `MEDPLUM_BASE_URL`, `MEDPLUM_CLIENT_ID`, `MEDPLUM_CLIENT_SECRET`,
-   `POSTGRES_PASSWORD` and `REDIS_PASSWORD` from the private `.env`, and add
-   `FHIR_BASE_URL` and `BLAZE_DATA_DIR` as in `.env.example`.
-3. Create the Blaze data directory, start Blaze and the app using the
-   [README instructions](README.md#start-the-blaze-fhir-server).
-   The staff roster is preloaded on first start; reimport reviewed attendee CSVs.
-4. If existing Medplum check-ins must be carried over, export Person,
-   Practitioner, List and AuditEvent resources as a FHIR transaction Bundle
-   with references rewritten to `urn:uuid` entries, and POST it to
-   `http://localhost:8090/fhir` before admitting attendees. Rehearse this on a
-   test Blaze directory first.
-
-For deployments with no recorded attendance to retain, use a clean start and
-reimport the reviewed rosters.
+Even earlier versions stored data in Medplum (PostgreSQL/Redis Docker volumes).
+Data is **not** migrated automatically. Stop the old application and its
+Compose services (do not run `docker compose down -v`; keep the volumes until
+retention/deletion is approved), remove the `MEDPLUM_*`, `POSTGRES_PASSWORD`
+and `REDIS_PASSWORD` settings from `.env`, start this version with an empty
+`DATA_DIR` and reimport the reviewed rosters. The staff roster is preloaded on
+first start.

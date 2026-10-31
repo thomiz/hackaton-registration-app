@@ -2,12 +2,12 @@
 
 Responsive attendee check-in and authenticated registration-desk tools for
 November 9, 2026 at Rebel, Oslo. React/TypeScript frontend, Fastify backend,
-Blaze FHIR R4 server persistence, and locally generated QR attendance receipts.
+FHIR R4 resources stored in a local JSON file, and locally generated QR attendance receipts.
 
 The app and FHIR implementation guide are named `hackathon-check-in-app`,
 version `0.7.0`. Installations older than 0.6.0 must follow the
 [0.6.0 upgrade guidance](DESIGN.md#upgrading-to-060) before using the renamed
-FHIR namespace and Compose project.
+FHIR namespace.
 
 ## Features
 
@@ -44,37 +44,24 @@ and migration guidance for older deployments.
 
 ## Windows setup
 
-Use a supported Windows version, hardware virtualization and Docker Desktop with
-the WSL 2 backend and Linux containers. Confirm Docker Desktop licensing for your
-organization. Use a maintained Node.js LTS release; the application currently
-supports Node.js 18.17+ for compatibility with the development PC.
+Use a supported Windows version and a maintained Node.js LTS release; the
+application currently supports Node.js 18.17+. No Docker, WSL, Java or database
+server is needed.
 
 ```powershell
 Set-Location 'D:\Programdisk-2\GitRepo\hackathon-check-in-app'
 .\scripts\Install-Prerequisites.ps1
-```
-
-This installs missing Git, Node.js LTS/npm and Docker Desktop using WinGet.
-Existing installations are not upgraded automatically. WinGet needs Microsoft
-App Installer. Installers may prompt for approval, licenses and restarts.
-The script does not change execution policy or accept licenses automatically.
-
-If needed, run `wsl --install` in administrator PowerShell, restart when requested,
-then complete Docker Desktop setup. For existing WSL installations, diagnose with
-`wsl --status` and update with `wsl --update` if required. Start Docker Desktop and
-wait for the engine before proceeding.
-
-```powershell
-.\scripts\Install-Prerequisites.ps1 -CheckOnly
 .\scripts\Install-App.ps1
 ```
 
-The application installer runs `npm ci`, builds the app and FHIR package, creates
-`.env` interactively if absent, validates Compose and pulls the pinned Blaze image.
-It never overwrites existing configuration or starts services. The initial staff
-password prompt is visible: run it privately and use a unique event password.
-Only its salted scrypt hash is saved. Restrict `.env` permissions to event operators.
-For dependency installation without image downloads, pass `-SkipImages`.
+The prerequisite script installs missing Git and Node.js LTS/npm using WinGet
+(Microsoft App Installer is required; installers may prompt for approval).
+Existing installations are not upgraded. The application installer runs
+`npm ci`, builds the app and FHIR package and creates `.env` interactively if
+absent. It never overwrites existing configuration or starts the app. The
+initial staff password prompt is visible: run it privately and use a unique
+event password. Only its salted scrypt hash is saved. Restrict `.env`
+permissions to event operators.
 
 Equivalent manual steps:
 
@@ -82,127 +69,72 @@ Equivalent manual steps:
 npm.cmd ci
 npm.cmd run configure
 npm.cmd run build
-npm.cmd run fhir:build
-npm.cmd run fhir:package
-npm.cmd run fhir:fixtures
-docker compose pull
 ```
 
-## Start the Blaze FHIR server
+## Data storage
 
-The FHIR backend is [Blaze](https://github.com/samply/blaze) `samply/blaze:1.11.0`
-(standalone RocksDB storage, FHIR R4), defined in `compose.yaml`. It is the only
-container: no separate database, cache or administration app is needed.
+All FHIR R4 resources (Person, Practitioner, List, AuditEvent) are kept in
+memory by the app and saved as one FHIR `collection` Bundle,
+`fhir-store.json`, in `DATA_DIR` (default `data` in the application folder,
+ignored by Git). The directory is created on first start.
 
-### Store the database on the host disk
+* Every change is written as a complete new file and atomically renamed over
+  the previous one, so a crash or power loss leaves either the old or the new
+  state, never a partial file. Concurrent check-ins are serialized and
+  version-checked, so simultaneous arrivals are never lost.
+* Only one process can open the data: the app holds `fhir-store.lock` while
+  running. Maintenance commands refuse to write while the app is running.
+  A lock left by a crashed app is detected and replaced automatically.
+* Search and the dashboard read from memory, so they are fast regardless of
+  network or disk speed.
+* The file contains personal data in readable form. Restrict the directory's
+  NTFS permissions to event operators and use BitLocker on the event PC.
+  Do not put it in a OneDrive/Dropbox-synchronized folder.
 
-Blaze stores its database in a **bind-mounted directory on the host disk**,
-outside the container. Keep this directory when stopping or upgrading services.
+To keep the data on another disk, set for example `DATA_DIR=D:\hackathon-data`
+in `.env`. Relative paths are resolved against the application folder.
 
-The host directory is set by `BLAZE_DATA_DIR` in `.env` (the example uses
-`./data/blaze`, relative to the repository; `data/` is ignored by Git). Compose
-requires an explicit, nonempty value; it no longer guesses a directory when
-the setting is absent. If an older installation relied on the implicit
-`C:\hackathon-data\blaze` location, record that existing location in `.env`
-before starting anything. Do not select a new empty directory for an upgrade.
-Compose uses `create_host_path: false`, so you must create the directory before the first
-start; a typo then fails loudly instead of silently starting an empty database.
-Use an empty directory for a new database.
+### Migrating from an earlier Blaze installation
+
+Versions before this one stored data in a Blaze FHIR server. To carry over
+existing rosters and attendance, start the old Blaze container once more and
+run, with an empty `DATA_DIR`:
 
 ```powershell
-# Default location inside the repository:
-New-Item -ItemType Directory -Force '.\data\blaze'
-
-# Or a dedicated, access-restricted data disk (recommended for the event):
-New-Item -ItemType Directory -Force 'D:\hackathon-data\blaze'
-# then in .env:  BLAZE_DATA_DIR=D:/hackathon-data/blaze
+npm.cmd run migrate:blaze -- 'http://localhost:8090/fhir'
 ```
 
-Use forward slashes or a quoted absolute path for `BLAZE_DATA_DIR` on Windows.
-Restrict the directory's NTFS permissions to event operators: it contains
-personal data in readable form (Blaze does not encrypt data at rest); use
-BitLocker on the event PC.
-
-Notes:
-
-* The container runs as UID 1001. With Docker Desktop on Windows, bind-mounted
-  Windows folders are writable without further steps. On a Linux host run
-  `sudo chown -R 1001:1001 <dir>` once.
-* Rehearse startup and check-in speed on the event PC. See
-  [Storage design](DESIGN.md#storage-and-transactions) for WSL storage options.
-* Never point two Blaze containers at the same directory at once.
-* Do not put the directory in a OneDrive/Dropbox-synchronized folder; sync tools
-  can corrupt open RocksDB files.
-
-### Start and check
-
-```powershell
-docker compose up -d
-docker compose ps
-Invoke-RestMethod 'http://localhost:8090/health'
-Invoke-RestMethod 'http://localhost:8090/fhir/metadata' | Select-Object -ExpandProperty software
-```
-
-Startup takes 10–60 seconds; `docker compose ps` shows `healthy` when ready.
-Check that files appeared in the host directory (for example
-`Get-ChildItem .\data\blaze`).
-
-Blaze listens on container port 8080; Compose publishes it **only on loopback**
-as `127.0.0.1:8090`, because the check-in app already uses 8080. Blaze runs
-**without authentication**: never change the port mapping to `0.0.0.0`, never
-forward it through a firewall or reverse proxy, and never expose it to the venue
-Wi-Fi. Phones and browsers only talk to the check-in backend, which is the
-only Blaze client. Set `FHIR_BASE_URL=http://localhost:8090/fhir` in `.env`.
-Keep `BASE_URL` in `compose.yaml` aligned with the host side
-(`http://localhost:8090`) so search paging works.
-
-Compose sets a 2 GB JVM heap (`JAVA_TOOL_OPTIONS=-Xmx2g`) plus a 256 MiB RocksDB
-block cache; allow about 3 GB RAM for Docker Desktop's WSL VM.
-
-Verify transaction/conditional-create behavior, version conflicts, backup
-restore and resource use on the event PC before admitting real attendees.
-See the [Blaze documentation](https://samply.github.io/blaze/) for configuration
-options.
+This copies the event's Lists, Persons, Practitioners and AuditEvents into
+`fhir-store.json` without changing Blaze. Afterwards Blaze, Docker Desktop and
+`compose.yaml` are no longer needed; keep the old Blaze data directory as an
+archive until the event is over. Alternatively, simply reimport the reviewed
+roster CSVs into a new installation.
 
 ## Run the application
-
-For day-to-day Windows operation, use the operations CLI:
 
 ```powershell
 npm.cmd run ops -- start
 # In a second PowerShell window:
 npm.cmd run ops -- status
-# Gracefully stop the app and Blaze:
-npm.cmd run ops -- stop
 ```
 
-`start` checks the existing database directory, starts Blaze, waits for health,
-then runs the app in the foreground. Leave its terminal open. Ctrl+C stops
-only the app; `stop --app-only` does the same from another terminal.
-No rebuild, dependency installation or roster replacement is performed on
-ordinary startup. See the [Operations CLI guide](OPERATIONS.md#operations-cli-recommended)
-for verified cold backups, read-only roster/reset previews and guarded
-`--apply` workflows. Each apply requires a stopped app, exact confirmation and
-a fresh verified backup. Configuration still uses `npm.cmd run configure`;
-there is no web administration console in this version.
+`start` checks that the UI is built, then runs the app in the foreground. Leave
+its terminal open; **Ctrl+C** stops the app. No rebuild, dependency installation
+or roster replacement is performed on ordinary startup. `npm.cmd run start` is
+equivalent without the build check. See the
+[Operations guide](OPERATIONS.md#operations-cli) for backups, read-only
+roster/reset previews and guarded `--apply` workflows. Configuration uses
+`npm.cmd run configure`; there is no web administration console.
 
-The existing manual startup remains available after starting and checking Blaze:
-
-```powershell
-npm.cmd run start
-```
-
-Open `http://localhost:8080`. Startup checks Blaze, initializes the three
-event Lists if needed, and preloads the bundled agenda staff roster if the staff
-List is empty. Preloading creates Persons only, never check-ins, Practitioners
-or receipts. Existing staff Lists are not automatically overwritten.
-A failed startup is an error, never an offline mock mode.
+Open `http://localhost:8080`. Startup initializes the three event Lists if
+needed and preloads the bundled agenda staff roster if the staff List is empty.
+Preloading creates Persons only, never check-ins, Practitioners or receipts.
+Existing staff Lists are not automatically overwritten.
 
 ```powershell
 Invoke-RestMethod 'http://localhost:8080/api/health'
 ```
 
-Health checks include a Blaze List query.
 The UI exposes the separate **Staff access** page; the staff roster does not grant
 login rights. Staff sessions last 30 minutes and require re-login after expiry.
 
@@ -218,10 +150,8 @@ See `.env.example`. Generated passwords and secrets belong only in `.env`.
   cookies. Set the final HTTPS origin for venue deployment.
 * `HOST`: defaults to loopback. For LAN access, configure binding/firewall and
   a trusted HTTPS reverse proxy; expose only the HTTPS application endpoint.
-* `FHIR_BASE_URL`: Blaze FHIR base including `/fhir`
-  (default `http://localhost:8090/fhir`). Must stay a loopback address.
-* `BLAZE_DATA_DIR`: required host directory for the Blaze database files, used by
-  `compose.yaml` (the example uses `./data/blaze`). Must exist before `docker compose up`.
+* `DATA_DIR`: directory for `fhir-store.json`, its lock and default backups
+  (default `data` in the application folder).
 * `PRIVACY_NOTICE_URL`: link to the event privacy notice.
 
 The 2026 event privacy notice must be updated before real use to cover check-in
@@ -241,7 +171,7 @@ Distribute that URL as a QR code. Keep the staffed kiosk as fallback.
 To follow check-ins from a second computer on the same Wi-Fi (for example a
 phone hotspot), use an SSH tunnel as described in
 [Monitor check-ins remotely](OPERATIONS.md#5-monitor-check-ins-remotely-over-wi-fi).
-Never publish the app or Blaze directly on the network.
+Never publish the app directly on the network.
 
 ## Roster imports
 
@@ -257,7 +187,7 @@ npm.cmd run staff:generate -- 'D:\Programdisk-2\GitRepo\Norwegian-FHIR-Hackathon
 This generates `seed\staff.csv`, a matching Person Bundle in
 `seed\staff-persons.json`, and source metadata/review warnings in
 `seed\staff-source.json`. Review the warnings before deployment. Startup imports
-the CSV; do not POST the collection Bundle directly to Blaze.
+the CSV; do not copy the collection Bundle into the data file.
 
 Track-associated rows use `track-lead`, while Partner rows use `attendee` with
 no primary track. Stable IDs are derived from names and are independent of email;
@@ -268,7 +198,8 @@ bundled ID and role when preparing that attendee CSV.
 After updating the master, regenerate and explicitly refresh an existing project:
 
 ```powershell
-npm.cmd run import -- staff '.\seed\staff.csv'
+npm.cmd run ops -- import --staff '.\seed\staff.csv'            # preview
+npm.cmd run ops -- import --staff '.\seed\staff.csv' --apply    # app stopped
 ```
 
 Each import replaces the staff list, removing people absent from the latest CSV
@@ -294,7 +225,7 @@ Example Person,example@example.invalid,Example Org,smart,attendee
 ```
 
 The optional `id` column is a stable participant key, not an email address or
-Blaze resource ID. Missing or empty IDs are generated as `roster-` plus a hash
+FHIR resource ID. Missing or empty IDs are generated as `roster-` plus a hash
 of normalized name and affiliation. IDs are deterministic across repeat imports,
 row ordering, email corrections and track changes. Keep name and affiliation
 unchanged on reimport, or supply the previously generated ID when correcting them.
@@ -317,8 +248,8 @@ existing Person and any recorded check-in. Empty/header-only CSVs are rejected;
 validation or transaction failures leave the previous list unchanged.
 
 ```powershell
-npm.cmd run import -- roster 'D:\private\reviewed-attendees.csv'
-npm.cmd run import -- staff 'D:\private\reviewed-staff.csv'
+npm.cmd run ops -- import --attendees 'D:\private\reviewed-attendees.csv'           # preview
+npm.cmd run ops -- import --attendees 'D:\private\reviewed-attendees.csv' --apply   # app stopped
 ```
 
 Alternatively paste CSV in the authenticated staff page.
@@ -446,51 +377,37 @@ npm.cmd test
 npm.cmd run build
 ```
 
-Before event day, also rehearse against the actual local Blaze server:
+Before event day, also rehearse on the event PC:
 
 1. Two simultaneous check-ins and a duplicate resubmission.
 2. A staff-only track lead and someone in both rosters.
 3. Manual registration, corrections, CSV export and reopening receipts.
 4. Adding a late sign-up to the attendee list from the dashboard, checking them
    in from the attendee page, and removing a cancelled person from the list.
-5. Blaze outage, internet outage, backend restart and PC reboot.
+5. Internet outage, app restart, killing the app process and PC reboot.
 6. Scan a real receipt using iPhone/Android, including long details; verify
    saved text, offline scanning, original timestamp, and workstation clearing.
 7. Local workstation access; trusted HTTPS if offering phone-based registration.
 8. Private backup and restore to a separate test instance.
 
-### Backup and restore of the host data directory
+### Backup and restore
 
-Because the Blaze database is an ordinary directory on the host disk, a
-consistent backup is a copy of that directory taken while Blaze is stopped
-(RocksDB files are not consistent while being written):
+`npm.cmd run ops -- backup` copies `fhir-store.json` to `DATA_DIR\backups`
+(or `--backup-dir`) and verifies the copy. It can run while the app is
+running, because the app always replaces the file atomically. Every maintenance
+`--apply` also takes a backup first. Take backups at agreed intervals (for
+example after the morning rush and at the end of the day) and copy them to a
+second, encrypted disk; `DATA_DIR\backups` alone does not protect against loss
+of the data disk. Protect backups as personal data, and retain `.env` securely
+for recovery.
 
-```powershell
-# Stop the check-in backend first (Ctrl+C in its window), then:
-docker compose stop blaze
-$stamp = Get-Date -Format 'yyyyMMdd-HHmm'
-robocopy '.\data\blaze' "D:\private\blaze-backup-$stamp" /MIR /COPY:DAT /R:1 /W:1
-docker compose start blaze
-```
+To restore, stop the app (Ctrl+C), move the current `fhir-store.json` aside
+(do not delete it), copy the chosen backup to `DATA_DIR\fhir-store.json`,
+start the app and verify the dashboard. To rehearse a restore, point
+`DATA_DIR` at an empty test directory instead.
 
-Use your `BLAZE_DATA_DIR` path instead of `.\data\blaze` if changed. `robocopy`
-exit codes below 8 mean success. Stopping takes a few seconds and interrupts
-check-in briefly, so take backups at quiet moments (e.g. after the morning rush
-and at the end of the day). Protect backups as personal data (encrypted disk or
-archive), and retain `.env` securely for recovery.
+The data file is itself a standard FHIR R4 collection Bundle, so it can be read
+by FHIR tools or loaded into any FHIR server.
 
-To restore, stop Blaze, point `BLAZE_DATA_DIR` at an empty test directory, copy
-the backup into it, start Blaze and verify the dashboard. Only restore over the
-live directory with an approved recovery procedure: stop Blaze, move the damaged
-directory aside (do not delete it), copy the backup into the original path and
-start Blaze again.
-
-For a portable, human-readable export in addition to file backups, you can
-download resources over the FHIR API while Blaze is running, for example
-`Invoke-RestMethod 'http://localhost:8090/fhir/Person?_count=500' | ConvertTo-Json -Depth 50 | Set-Content -Encoding utf8 D:\private\persons.json`
-(repeat for Practitioner, List and AuditEvent and follow `next` links if present).
-
-`docker compose stop` and `docker compose down` both keep the host directory.
-Data is deleted only by removing the `BLAZE_DATA_DIR` directory itself; do so
-only after the approved retention date, and also delete backups. Document the
-retention/deletion date.
+Data is deleted only by deleting `DATA_DIR` and its backups; do so only after
+the approved retention date. Document the retention/deletion date.

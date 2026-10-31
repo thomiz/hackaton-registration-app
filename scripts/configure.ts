@@ -23,4 +23,4 @@ const values: Record<string, string> = {
 const template = await readFile('.env.example', 'utf8');
 await writeFile('.env', template.replace(/^([A-Z_]+)=(.*)$/gm, (line, key: string) => key in values ? `${key}=${values[key]}` : line), { flag: 'wx', mode: 0o600 });
 console.log('Created .env with generated secrets. Restrict its Windows file permissions to event operators.');
-console.log('Next create the Blaze host data directory (BLAZE_DATA_DIR) and start Blaze with docker compose up -d. See README.md.');
+console.log('Next run "npm run build", then "npm run ops -- start". See README.md.');

@@ -1,12 +1,11 @@
 import { loadConfig } from './config.js';
-import { operationPaths, withOperationLock } from './operations-runtime.js';
-import { startApplication, waitForApplication } from './startup.js';
+import { runUntilStopped, startApplication } from './startup.js';
 
-const config = loadConfig();
-const paths = operationPaths(config.fhir.baseUrl);
 try {
-  const running = await withOperationLock(paths, () => startApplication(config, paths));
-  await waitForApplication(running);
+  const config = loadConfig();
+  const running = await startApplication(config);
+  console.log(`Check-in app ready at ${config.publicUrl} (data: ${config.dataDir}). Press Ctrl+C to stop.`);
+  await runUntilStopped(running);
 } catch (error) {
   console.error('The check-in server failed:', error instanceof Error ? error.message : 'Unknown error');
   process.exitCode = 1;

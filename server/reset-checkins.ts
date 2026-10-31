@@ -36,7 +36,7 @@ export async function previewResetCheckins(service: RegistrationService) {
 
 export async function resetCheckins(service: RegistrationService): Promise<number> {
   const { entries, eventPractitioners } = await planReset(service);
-  // Blaze checks DELETE references against the database before the transaction.
+  // References are checked before a transaction, so links are removed before the Practitioners are deleted.
   await service.store.transaction(entries);
   if (eventPractitioners.length) {
     await service.store.transaction(eventPractitioners.map(p => ({

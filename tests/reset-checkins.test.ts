@@ -68,7 +68,7 @@ describe('attendance reset', () => {
     expect(await store.search('Practitioner', '')).toHaveLength(0);
     expect((await arrive()).alreadyCheckedIn).toBe(false);
   });
-  it('models Blaze rejecting deletes whose references are only removed in the same transaction', async () => {
+  it('rejects deletes whose references are only removed in the same transaction', async () => {
     const first = await arrive();
     const list = await service.list(LISTS.checkins);
     list.entry = [];

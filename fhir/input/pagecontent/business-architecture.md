@@ -23,7 +23,7 @@ Before the event, the organizer imports the expected participants. Each person
 is represented as a `Person` in the `RosterList`, which the app uses as the
 source for attendee lookup. On arrival, the attendee is matched to that roster
 entry and confirms their details. The app backend then records the arrival in
-Blaze, the FHIR R4 server: it creates a `Practitioner` for the checked-in
+its local FHIR R4 resource store: it creates a `Practitioner` for the checked-in
 participant, links it from the `Person`, and adds it to the `CheckinList` with
 the arrival time. These related changes are saved together in a FHIR
 transaction.
